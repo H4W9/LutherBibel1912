@@ -16,6 +16,9 @@
 #define DATA_DIR        "/ext/apps_data/luther1912"
 #define SETTINGS_PATH   DATA_DIR "/settings.txt"
 
+#define BOOKMARKS_PATH  DATA_DIR "/bookmarks.txt"
+#define MAX_BOOKMARKS    50
+
 #define MAX_SECTIONS      4
 #define MAX_BOOKS        80
 #define MAX_VERSES       25  // cache holds at most one page (VERSE_PAGE_SIZE)
@@ -24,7 +27,7 @@
 
 #define HDR_H            12
 #define MENU_ROW_H       10
-#define MENU_ROWS         7
+#define MENU_ROWS         8
 #define MENU_VIS          5
 #define MENU_BODY_Y      (HDR_H + 1)
 #define READ_BODY_Y      (HDR_H + 2)
@@ -52,6 +55,7 @@ typedef enum {
     ViewAbout,
     ViewSearch,
     ViewSearchResults,
+    ViewBookmarks,
     ViewLoading,
     ViewError,
 } AppView;
@@ -62,8 +66,9 @@ typedef enum {
     RowChapter  = 2,
     RowVerse    = 3,
     RowSearch   = 4,
-    RowSettings = 5,
-    RowAbout    = 6,
+    RowBookmarks= 5,
+    RowSettings = 6,
+    RowAbout    = 7,
 } MenuRow;
 
 typedef enum {
@@ -155,6 +160,17 @@ typedef struct App {
     uint8_t hit_scroll;
 
     char error_msg[64];
+
+    // Bookmarks
+    struct {
+        uint8_t sec;
+        uint8_t canon_book;  // index into CANON_BOOKS[]
+        uint8_t chapter;     // 0-based
+        uint8_t verse;       // 1-based
+    } bookmarks[MAX_BOOKMARKS];
+    uint8_t bm_count;
+    uint8_t bm_sel;
+    uint8_t bm_scroll;
 
     // Navigation history: view to return to when pressing Back from reading
     AppView prev_view;

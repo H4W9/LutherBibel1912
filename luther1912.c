@@ -215,7 +215,110 @@ static void settings_load(App* app) {
     if((p = strstr(buf, "verse=")) != NULL) { int v=atoi(p+6); if(v>=0&&v<=176) app->verse_idx=(uint8_t)v; }
 }
 
-// Canonical book helpers
+// Bookmarks persistence
+
+static void bookmarks_save(App* app) {
+    File* f = storage_file_alloc(app->storage);
+    if(!storage_file_open(f, BOOKMARKS_PATH, FSAM_WRITE, FSOM_CREATE_ALWAYS)) {
+        storage_file_free(f);
+        return;
+    }
+    for(uint8_t i = 0; i < app->bm_count; i++) {
+        char line[32];
+        int len = snprintf(line, sizeof(line), "%d %d %d %d\n",
+            (int)app->bookmarks[i].sec,
+            (int)app->bookmarks[i].canon_book,
+            (int)app->bookmarks[i].chapter,
+            (int)app->bookmarks[i].verse);
+        if(len > 0) storage_file_write(f, line, (uint16_t)len);
+    }
+    storage_file_close(f);
+    storage_file_free(f);
+}
+
+static void bookmarks_load(App* app) {
+    app->bm_count  = 0;
+    app->bm_sel    = 0;
+    app->bm_scroll = 0;
+    File* f = storage_file_alloc(app->storage);
+    if(!storage_file_open(f, BOOKMARKS_PATH, FSAM_READ, FSOM_OPEN_EXISTING)) {
+        storage_file_free(f);
+        return;
+    }
+    char buf[512];
+    uint16_t rd = storage_file_read(f, buf, sizeof(buf) - 1);
+    buf[rd] = '\0';
+    storage_file_close(f);
+    storage_file_free(f);
+
+    char* line = buf;
+    while(*line && app->bm_count < MAX_BOOKMARKS) {
+        int sec, cb, ch, vv;
+        if(sscanf(line, "%d %d %d %d", &sec, &cb, &ch, &vv) == 4) {
+            if(sec >= 0 && sec < 4 && cb >= 0 && cb < CANON_BOOK_COUNT &&
+               ch >= 0 && vv >= 1) {
+                app->bookmarks[app->bm_count].sec        = (uint8_t)sec;
+                app->bookmarks[app->bm_count].canon_book = (uint8_t)cb;
+                app->bookmarks[app->bm_count].chapter    = (uint8_t)ch;
+                app->bookmarks[app->bm_count].verse      = (uint8_t)vv;
+                app->bm_count++;
+            }
+        }
+        // Advance to next line
+        while(*line && *line != '\n') line++;
+        if(*line == '\n') line++;
+    }
+}
+
+// Returns the index of the current single verse in bookmarks[], or -1 if absent
+static int bookmark_find(App* app) {
+    if(app->verse_idx == 0 || app->book_count == 0) return -1;
+    uint8_t cb = app->book_list[app->book_idx];
+    for(int i = 0; i < (int)app->bm_count; i++) {
+        if(app->bookmarks[i].sec        == app->section_idx &&
+           app->bookmarks[i].canon_book == cb &&
+           app->bookmarks[i].chapter    == app->chapter_idx &&
+           app->bookmarks[i].verse      == app->verse_idx)
+            return i;
+    }
+    return -1;
+}
+
+static bool bookmark_is_set(App* app) {
+    return bookmark_find(app) >= 0;
+}
+
+static void bookmark_toggle(App* app) {
+    if(app->verse_idx == 0 || app->book_count == 0) return;
+    int idx = bookmark_find(app);
+    if(idx >= 0) {
+        // Remove
+        for(uint8_t i = (uint8_t)idx; i + 1 < app->bm_count; i++)
+            app->bookmarks[i] = app->bookmarks[i + 1];
+        app->bm_count--;
+    } else {
+        // Add
+        if(app->bm_count >= MAX_BOOKMARKS) return;
+        uint8_t i = app->bm_count;
+        app->bookmarks[i].sec        = app->section_idx;
+        app->bookmarks[i].canon_book = app->book_list[app->book_idx];
+        app->bookmarks[i].chapter    = app->chapter_idx;
+        app->bookmarks[i].verse      = app->verse_idx;
+        app->bm_count++;
+    }
+    bookmarks_save(app);
+}
+
+// Convert a canonical book folder name to a display label (underscores → spaces)
+static void canon_book_label(uint8_t canon_idx, char* buf, size_t len) {
+    const char* src = CANON_BOOKS[canon_idx].folder;
+    size_t i;
+    for(i = 0; i < len - 1 && src[i]; i++)
+        buf[i] = (src[i] == '_') ? ' ' : src[i];
+    buf[i] = '\0';
+}
+
+
 
 void rebuild_book_list(App* app) {
     uint8_t sec = app->section_idx;
@@ -618,6 +721,17 @@ static void draw_menu(Canvas* canvas, App* app) {
             canvas_draw_str_aligned(canvas, SCREEN_W - SB_W - 3, y + 8,
                                     AlignRight, AlignBottom, ">");
             break;
+        case RowBookmarks: {
+            canvas_draw_str(canvas, 2, y + 8, "Bookmarks");
+            char bval[8];
+            if(app->bm_count == 0)
+                snprintf(bval, sizeof(bval), ">");
+            else
+                snprintf(bval, sizeof(bval), "%d >", (int)app->bm_count);
+            canvas_draw_str_aligned(canvas, SCREEN_W - SB_W - 3, y + 8,
+                                    AlignRight, AlignBottom, bval);
+            break;
+        }
         case RowSettings:
             canvas_draw_str(canvas, 2, y + 8, "Settings");
             canvas_draw_str_aligned(canvas, SCREEN_W - SB_W - 3, y + 8,
@@ -652,14 +766,26 @@ static void draw_reading(Canvas* canvas, App* app) {
     current_book_label(app, book_label, sizeof(book_label));
 
     char hdr[64];
+    bool bm_star = false;
     if(app->verse_idx == 0)
         snprintf(hdr, sizeof(hdr), "%s %d",
                  book_label, (int)(app->chapter_idx + 1));
-    else
+    else {
+        bm_star = bookmark_is_set(app);
         snprintf(hdr, sizeof(hdr), "%s %d:%d",
                  book_label, (int)(app->chapter_idx + 1), (int)app->verse_idx);
+    }
 
     draw_hdr(canvas, hdr);
+
+    // Draw bold bookmark star in the header using FontPrimary (same as header font)
+    if(bm_star) {
+        canvas_set_color(canvas, ColorWhite);
+        canvas_set_font(canvas, FontPrimary);
+        canvas_draw_str_aligned(canvas, SCREEN_W - 2, 1,
+                                AlignRight, AlignTop, "*");
+        canvas_set_color(canvas, ColorBlack);
+    }
 
     // Page turn hints: show "<" on the left and/or ">" on the right of the
     // header when in All mode and there are previous/next verse pages.
@@ -819,12 +945,17 @@ static const char* const ABOUT_LINES[] = {
     "   Up/Down = scroll",
     "   Left = previous",
     "   Right = next",
+    "   Long-OK = bookmark",
     "   Back = back to menu",
     "- - - - Settings - - - - ",
     "   Up/Down = move row",
     "   Left/Right = toggle",
     "   Long-OK = font list",
     "   OK = save & close",
+    "- - - - Bookmarks - - - -",
+    "   Up/Down = move",
+    "   OK = jump to verse",
+    "   Back = close",
     "- - - - Search - - - - - ",
     "   Select book first",
     "   OK on Search row",
@@ -863,7 +994,70 @@ static void draw_about(Canvas* canvas, App* app) {
     draw_scrollbar(canvas, app, app->about_scroll, ABOUT_LINE_COUNT, vis);
 }
 
-// Scene: Loading / Error
+// Scene: Bookmarks
+
+static void draw_bookmarks(Canvas* canvas, App* app) {
+    if(app->dark_mode) {
+        canvas_set_color(canvas, ColorBlack);
+        canvas_draw_box(canvas, 0, 0, SCREEN_W, SCREEN_H);
+    }
+
+    char hdr_buf[24];
+    if(app->bm_count == 0)
+        snprintf(hdr_buf, sizeof(hdr_buf), "Bookmarks");
+    else
+        snprintf(hdr_buf, sizeof(hdr_buf), "Bookmarks (%d)", (int)app->bm_count);
+    draw_hdr(canvas, hdr_buf);
+
+    set_fg(canvas, app);
+    canvas_set_font(canvas, FontSecondary);
+
+    if(app->bm_count == 0) {
+        canvas_draw_str_aligned(canvas, SCREEN_W / 2, 34,
+                                AlignCenter, AlignCenter, "No bookmarks");
+        canvas_draw_str_aligned(canvas, SCREEN_W / 2, 46,
+                                AlignCenter, AlignCenter, "Hold OK on a verse");
+        return;
+    }
+
+    const uint8_t LINE_H = 10;
+    const uint8_t vis    = (uint8_t)((SCREEN_H - HDR_H - 2) / LINE_H);
+
+    // Clamp scroll
+    if(app->bm_sel < app->bm_scroll)
+        app->bm_scroll = app->bm_sel;
+    if(app->bm_sel >= app->bm_scroll + vis)
+        app->bm_scroll = (uint8_t)(app->bm_sel - vis + 1);
+
+    for(uint8_t i = 0; i < vis && (app->bm_scroll + i) < app->bm_count; i++) {
+        uint8_t si = app->bm_scroll + i;
+        uint8_t y  = HDR_H + 2 + i * LINE_H;
+        bool    sel = (si == app->bm_sel);
+
+        if(sel) {
+            set_fg(canvas, app);
+            canvas_draw_box(canvas, 0, y - 1, SCREEN_W - SB_W - 2, LINE_H);
+            set_bg(canvas, app);
+        } else {
+            set_fg(canvas, app);
+        }
+
+        // Build reference label: "BookName ch:v"
+        char blabel[14];
+        canon_book_label(app->bookmarks[si].canon_book, blabel, sizeof(blabel));
+        char ref[32];
+        snprintf(ref, sizeof(ref), "%s %d:%d",
+                 blabel,
+                 (int)(app->bookmarks[si].chapter + 1),
+                 (int)app->bookmarks[si].verse);
+        canvas_draw_str(canvas, 4, y + 8, ref);
+        set_fg(canvas, app);
+    }
+
+    draw_scrollbar(canvas, app, app->bm_scroll, app->bm_count, vis);
+}
+
+
 
 static void draw_loading(Canvas* canvas, App* app) {
     if(app->dark_mode) {
@@ -895,6 +1089,7 @@ static void draw_cb(Canvas* canvas, void* ctx) {
     case ViewReading:  draw_reading(canvas, app);  break;
     case ViewSettings: draw_settings(canvas, app); break;
     case ViewAbout:    draw_about(canvas, app);    break;
+    case ViewBookmarks:     draw_bookmarks(canvas, app);     break;
     case ViewSearch:        draw_search_input(canvas, app);   break;
     case ViewSearchResults: draw_search_results(canvas, app); break;
     case ViewLoading:  draw_loading(canvas, app);  break;
@@ -1034,6 +1229,11 @@ static void on_menu(App* app, InputEvent* ev) {
             app->hit_scroll = 0;
             app->view = ViewSearch;
             break;
+        case RowBookmarks:
+            app->bm_sel    = 0;
+            app->bm_scroll = 0;
+            app->view = ViewBookmarks;
+            break;
         case RowSettings:
             app->settings_sel       = SettingsRowFont;
             app->settings_font_sel  = (uint8_t)app->font_choice;
@@ -1081,6 +1281,11 @@ void open_reading(App* app) {
 // Input: Reading
 
 static void on_reading(App* app, InputEvent* ev) {
+    // Long-press OK in single-verse mode: toggle bookmark
+    if(ev->type == InputTypeLong && ev->key == InputKeyOk) {
+        if(app->verse_idx != 0) bookmark_toggle(app);
+        return;
+    }
     if(ev->type != InputTypeShort && ev->type != InputTypeRepeat) return;
     uint8_t vis = font_visible_lines(app->font_choice);
 
@@ -1286,6 +1491,57 @@ static void on_about(App* app, InputEvent* ev) {
     }
 }
 
+// Input: Bookmarks
+
+static void on_bookmarks(App* app, InputEvent* ev) {
+    if(ev->type != InputTypeShort && ev->type != InputTypeRepeat) return;
+
+    const uint8_t LINE_H = 10;
+    const uint8_t vis    = (uint8_t)((SCREEN_H - HDR_H - 2) / LINE_H);
+
+    switch(ev->key) {
+    case InputKeyUp:
+        if(app->bm_sel > 0) app->bm_sel--;
+        break;
+    case InputKeyDown:
+        if(app->bm_sel < app->bm_count - 1) app->bm_sel++;
+        break;
+    case InputKeyOk:
+        if(app->bm_count == 0) break;
+        {
+            uint8_t bi = app->bm_sel;
+            uint8_t cb = app->bookmarks[bi].canon_book;
+            // Find which section this book belongs to
+            app->section_idx = app->bookmarks[bi].sec;
+            rebuild_book_list(app);
+            // Find book_idx for canon_book in book_list
+            app->book_idx = 0;
+            for(uint8_t k = 0; k < app->book_count; k++) {
+                if(app->book_list[k] == cb) { app->book_idx = k; break; }
+            }
+            app->chapter_idx = app->bookmarks[bi].chapter;
+            app->verse_idx   = app->bookmarks[bi].verse;
+            refresh_chapter_count(app);
+            refresh_verse_count(app);
+            app->prev_view = ViewBookmarks;
+            open_reading(app);
+        }
+        break;
+    case InputKeyBack:
+        app->view = ViewMenu;
+        break;
+    default: break;
+    }
+
+    // Keep scroll in sync
+    if(app->bm_count > 0) {
+        if(app->bm_sel < app->bm_scroll)
+            app->bm_scroll = app->bm_sel;
+        if(app->bm_sel >= app->bm_scroll + vis)
+            app->bm_scroll = (uint8_t)(app->bm_sel - vis + 1);
+    }
+}
+
 // Entry point
 
 int32_t luther1912_app(void* p) {
@@ -1315,6 +1571,9 @@ int32_t luther1912_app(void* p) {
     // Load saved settings + last position
     settings_load(app);
 
+    // Load bookmarks
+    bookmarks_load(app);
+
     // Build book list for restored section
     rebuild_book_list(app);
 
@@ -1336,6 +1595,7 @@ int32_t luther1912_app(void* p) {
         case ViewSettings: on_settings(app, &ev); break;
         case ViewSearch:        on_search(app, &ev);         break;
         case ViewSearchResults: on_search_results(app, &ev); break;
+        case ViewBookmarks:     on_bookmarks(app, &ev);      break;
         case ViewAbout:    on_about(app, &ev);    break;
         case ViewError:
             if(ev.type == InputTypeShort && ev.key == InputKeyBack)
