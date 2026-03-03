@@ -83,7 +83,7 @@ void draw_search_input(Canvas* canvas, App* app) {
         const char* sug = app->suggest[app->suggest_sel];
         // Find the prefix (last word) so we can show only the completion tail
         // But display the full word right-aligned with a leading separator
-        char sug_disp[KEYWORD_WORD_LEN + 4];
+        char sug_disp[KEYWORD_WORD_LEN + 8];  // "99/99 " prefix (6) + word (31) + NUL
         // Show index indicator if more than one suggestion: "1/3 Word"
         if(app->suggest_count > 1) {
             snprintf(sug_disp, sizeof(sug_disp), "%d/%d %s",
