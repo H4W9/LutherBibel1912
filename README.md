@@ -49,6 +49,8 @@ This app was built with the assistance of [Claude](https://www.google.com/aclk?s
 |---|---|
 | **Up / Down** | Navigate menus; scroll verse text and search results |
 | **Left / Right** | Cycle Book / Chapter / Verse in the quick picker; switch settings |
+| **Up (long)** | Fill suggested word |
+| **Left / Right (long)** | Cycle through input suggestions |
 | **OK (short)** | Select menu item; type character on keyboard; confirm action |
 | **OK (long)** | Toggle caps lock; bookmark the current verse |
 | **Back (short)** | Return to previous screen; backspace in text input |
