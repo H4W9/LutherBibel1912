@@ -56,7 +56,7 @@ BOOK_MAP_DE = {
     "Ps":      ("Altes_Testament", "Psalm"),
     "Prov":    ("Altes_Testament", "Spruche"),
     "Eccl":    ("Altes_Testament", "Prediger"),
-    "Song":    ("Altes_Testament", "Hoheslied"),
+    "Song":    ("Altes_Testament", "Hohelied"),
     # ── Propheten ────────────────────────────────────────────────────────────
     "Isa":     ("Propheten", "Jesaja"),
     "Jer":     ("Propheten", "Jeremia"),

@@ -1728,14 +1728,18 @@ static void on_menu(App* app, InputEvent* ev) {
             break;
         case RowChapter:
             if(app->chapter_count == 0) break;
-            app->chapter_idx = (app->chapter_idx >= step) ?
-                app->chapter_idx - step : 0;
+            if(app->chapter_idx >= step)
+                app->chapter_idx = app->chapter_idx - step;
+            else
+                app->chapter_idx = app->chapter_count - 1;  // wrap to last
             app->verse_idx = 0;
             refresh_verse_count(app);
             break;
         case RowVerse:
-            app->verse_idx = (app->verse_idx >= step) ?
-                app->verse_idx - step : 0;
+            if(app->verse_idx >= step)
+                app->verse_idx = app->verse_idx - step;
+            else
+                app->verse_idx = app->verse_count;  // wrap to last verse (0=All wraps to last)
             break;
         default: break;
         }
@@ -1765,14 +1769,18 @@ static void on_menu(App* app, InputEvent* ev) {
             break;
         case RowChapter:
             if(app->chapter_count == 0) break;
-            app->chapter_idx = (app->chapter_idx + step < app->chapter_count) ?
-                app->chapter_idx + step : app->chapter_count - 1;
+            if(app->chapter_idx + step < app->chapter_count)
+                app->chapter_idx = app->chapter_idx + step;
+            else
+                app->chapter_idx = 0;  // wrap to first
             app->verse_idx = 0;
             refresh_verse_count(app);
             break;
         case RowVerse:
-            app->verse_idx = (app->verse_idx + step <= app->verse_count) ?
-                app->verse_idx + step : app->verse_count;
+            if(app->verse_idx + step <= app->verse_count)
+                app->verse_idx = app->verse_idx + step;
+            else
+                app->verse_idx = 0;  // wrap to All (0)
             break;
         default: break;
         }
