@@ -1,7 +1,7 @@
 // Luther Bibel 1912 Viewer for Flipper Zero
 // SD card: /ext/apps_data/luther1912/<Section>/<Book>/<Chapter>/verseN.txt
 
-#define APP_VERSION "1.2"
+#define APP_VERSION "1.3"
 #define APP_NAME    "FZ Bible"
 
 #include "font/font.h"
@@ -158,6 +158,12 @@ static const char* const SECTION_LABELS[4] = {
     "Propheten",
     "Apokryphen",
     "Neues Testament",
+};
+static const char* const SECTION_LABELS_EN[4] = {
+    "Old Testament",
+    "Prophets",
+    "Apocrypha",
+    "New Testament",
 };
 
 // Per-translation flag: true if the active translation uses English folder names.
@@ -376,6 +382,16 @@ void set_ui_font(Canvas* canvas, const char* str) {
 // Prefers display_label (with proper umlauts) when set; otherwise falls back
 // to deriving the label from the filesystem folder name (underscores → spaces).
 static void canon_book_label(App* app, uint8_t canon_idx, char* buf, size_t len) {
+    // For English translations, derive the label from the English folder name
+    // (underscores → spaces) so book names match the translation's language.
+    if(app->section_lang_en && CANON_BOOKS[canon_idx].folder_en != NULL) {
+        const char* src = CANON_BOOKS[canon_idx].folder_en;
+        size_t i;
+        for(i = 0; i < len - 1 && src[i]; i++)
+            buf[i] = (src[i] == '_') ? ' ' : src[i];
+        buf[i] = '\0';
+        return;
+    }
     if(CANON_BOOKS[canon_idx].display_label != NULL) {
         // Use the pre-composed display name (may contain umlauts)
         strncpy(buf, CANON_BOOKS[canon_idx].display_label, len - 1);
@@ -397,7 +413,9 @@ static void canon_book_label(App* app, uint8_t canon_idx, char* buf, size_t len)
 // ============================================================
 
 // Built-in fallback list – covers common Luther Bible vocabulary.
-// User can override by placing keywords.txt in DATA_DIR on the SD card.
+// User can override by placing keywords_de.txt (German) or keywords_en.txt
+// (English) in DATA_DIR on the SD card. The correct file is chosen based on
+// the active translation's folder language (section_lang_en).
 static const char* const BUILTIN_KEYWORDS[] = {
     // People & patriarchs
     "Abraham","Adam","Apostel","Daniel","David","Elia","Elija","Esau",
@@ -454,6 +472,63 @@ static const char* const BUILTIN_KEYWORDS[] = {
 
 #define BUILTIN_KW_COUNT ((uint16_t)(sizeof(BUILTIN_KEYWORDS)/sizeof(BUILTIN_KEYWORDS[0])))
 
+// Built-in English keyword list – used automatically when the active translation
+// uses English folder names (section_lang_en == true) and no keywords_en.txt is
+// present on the SD card.
+static const char* const BUILTIN_KEYWORDS_EN[] = {
+    // People & patriarchs
+    "Abraham","Adam","Apostle","Daniel","David","Elijah","Elisha","Esau",
+    "Eve","Hagar","Job","Isaac","Jacob","Jesus","John","Joseph",
+    "Joshua","Judas","Cain","Luke","Mary","Mark","Matthew","Moses",
+    "Nimrod","Noah","Paul","Peter","Solomon","Samuel","Sarah","Simeon",
+    // Titles & roles
+    "Christ","Lord","Savior","King","Priest","Prophet","Judge",
+    "Disciple","HighPriest","Scribe","Pharisee","Servant","Shepherd",
+    "Levite","Nazarene","Apostle","Elder","Deacon",
+    // God & faith
+    "Faith","Grace","God","Worship","Holy","Hope","Love",
+    "Mercy","Compassion","Redemption","Eternity","Freedom",
+    "Righteousness","Glory","Holiness","Praise","Faithfulness",
+    "Forgiveness","Providence","Truth","Wisdom","Miracle","Sign",
+    // Worship & practice
+    "Altar","Amen","Prayer","Commandment","Law","Worship","Praise",
+    "Offering","Sabbath","Blessing","Baptism","Temple","Tithe",
+    "Circumcision","Confession","Repentance","Thanksgiving","Fasting",
+    "Vow","Sacrifice","Covenant",
+    // Salvation & sin
+    "Salvation","Sin","Guilt","Remorse","Repentance","Judgment",
+    "Deliverance","Condemnation","Atonement","Punishment","Wrath",
+    "Reconciliation","Justification","Sanctification",
+    // Creation & nature
+    "Earth","Fire","Heaven","Light","Sea","Night","Day","Water",
+    "Wind","Mountain","River","Garden","Land","Star","Sun","Moon",
+    "Cloud","Rain","Desert","Valley","Wave","Field","Tree","Wilderness",
+    // Objects & places
+    "Ark","Bread","Tomb","Cross","Lamb","Sword","Stone","Staff",
+    "ArkOfCovenant","Jerusalem","Israel","Zion","Bethlehem",
+    "Galilee","Jordan","Capernaum","Nazareth",
+    "Egypt","Babylon","Sinai","Golgotha","Canaan","Judea","Samaria",
+    // Body & life
+    "Eye","Blood","Brother","Hand","Heart","Life","Body","Mother",
+    "Name","Soul","Son","Death","Father","Daughter","Sister","Spirit",
+    "Breath","Flesh","Strength","Voice","Bone","Face",
+    // Key concepts
+    "Book","Angel","Gospel","Peace","Church","Parable","Praise",
+    "Psalm","Kingdom","Comfort","People","Word","Testimony","Resurrection",
+    "Humility","Unity","Obedience","Patience","Goodness","Harp",
+    "Hosanna","Hunger","Power","Longsuffering","Love","Savior",
+    "Devil","Dream","Vision","Prophecy","Covenant","Promise",
+    // Common English search words
+    "not","and","but","also","for","how","when","that","all",
+    "everything","many","great","good","new","old","holy","eternal","true",
+    "small","strong","weak","poor","rich","righteous",
+    "evil","devout","wise","patient","faithful","ready","living",
+    "beginning","end","time","year","morning","evening",
+    "way","world","enemy","battle","call","marriage","peace","sorrow","joy",
+};
+
+#define BUILTIN_KW_EN_COUNT ((uint16_t)(sizeof(BUILTIN_KEYWORDS_EN)/sizeof(BUILTIN_KEYWORDS_EN[0])))
+
 // Static storage for keyword table -- kept out of App to avoid bloating the
 // heap allocation and to ensure it lives in BSS (zero-initialised).
 static char s_kw_words[MAX_KEYWORDS][KEYWORD_WORD_LEN];
@@ -465,8 +540,9 @@ void keywords_load(App* app) {
     app->suggest_count = 0;
     app->suggest_sel   = 0;
 
+    const char* kw_path = app->section_lang_en ? KEYWORDS_PATH_EN : KEYWORDS_PATH_DE;
     File* f = storage_file_alloc(app->storage);
-    bool from_file = storage_file_open(f, KEYWORDS_PATH, FSAM_READ, FSOM_OPEN_EXISTING);
+    bool from_file = storage_file_open(f, kw_path, FSAM_READ, FSOM_OPEN_EXISTING);
     if(from_file) {
         // Read line-by-line with a small stack buffer to avoid stack overflow.
         char line[KEYWORD_WORD_LEN + 2];
@@ -505,13 +581,24 @@ void keywords_load(App* app) {
         storage_file_free(f);
     } else {
         storage_file_free(f);
-        // Use built-in list
-        for(uint16_t i = 0; i < BUILTIN_KW_COUNT && i < MAX_KEYWORDS; i++) {
-            strncpy(s_kw_words[i], BUILTIN_KEYWORDS[i], KEYWORD_WORD_LEN - 1);
+        // No language-specific keywords file on SD card (keywords_de.txt /
+        // keywords_en.txt): pick the built-in list that matches the active
+        // translation's language (English folder layout → English words,
+        // German folder layout → German words).
+        const char* const* src;
+        uint16_t           src_count;
+        if(app->section_lang_en) {
+            src       = BUILTIN_KEYWORDS_EN;
+            src_count = BUILTIN_KW_EN_COUNT;
+        } else {
+            src       = BUILTIN_KEYWORDS;
+            src_count = BUILTIN_KW_COUNT;
+        }
+        for(uint16_t i = 0; i < src_count && i < MAX_KEYWORDS; i++) {
+            strncpy(s_kw_words[i], src[i], KEYWORD_WORD_LEN - 1);
             s_kw_words[i][KEYWORD_WORD_LEN - 1] = '\0';
         }
-        s_kw_count = (BUILTIN_KW_COUNT < MAX_KEYWORDS) ?
-                     (uint16_t)BUILTIN_KW_COUNT : MAX_KEYWORDS;
+        s_kw_count = (src_count < MAX_KEYWORDS) ? src_count : MAX_KEYWORDS;
     }
     app->kw_count = s_kw_count;
 }
@@ -1085,8 +1172,10 @@ static void draw_menu(Canvas* canvas, App* app) {
 
             char val[64];
             if(r == RowSection) {
+                const char* const* sec_labels =
+                    app->section_lang_en ? SECTION_LABELS_EN : SECTION_LABELS;
                 snprintf(val, sizeof(val), "<%s>",
-                         SECTION_LABELS[app->section_idx]);
+                         sec_labels[app->section_idx]);
             } else if(r == RowBook) {
                 if(app->book_count == 0)
                     snprintf(val, sizeof(val), "<?>");
@@ -1892,6 +1981,11 @@ static void apply_translation_switch(App* app) {
     refresh_verse_count(app);
     memset(&app->chapter, 0, sizeof(app->chapter));
     memset(&app->wrap,    0, sizeof(app->wrap));
+    // Reload keyword suggestions for the new translation's language.
+    // section_lang_en has been set by rebuild_section_list() above, so
+    // keywords_load() will now pick the correct file (keywords_de.txt or
+    // keywords_en.txt) or built-in list.
+    keywords_load(app);
 }
 
 // Input: Settings
@@ -2144,12 +2238,14 @@ int32_t luther1912_app(void* p) {
     // Load bookmarks
     bookmarks_load(app);
 
-    // Load keyword suggestions
-    keywords_load(app);
-
-    // Build available section list for the active translation, then book list
+    // Build available section list for the active translation, then book list.
+    // This must happen before keywords_load so section_lang_en is set correctly,
+    // allowing the right built-in keyword list (German vs English) to be chosen.
     rebuild_section_list(app);
     rebuild_book_list(app);
+
+    // Load keyword suggestions (uses section_lang_en set above)
+    keywords_load(app);
 
     // Clamp restored indices to what's actually on the SD
     refresh_chapter_count(app);

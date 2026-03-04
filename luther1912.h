@@ -44,7 +44,8 @@
 #define MAX_SEARCH_LEN   64
 #define MAX_SEARCH_HITS  30
 
-#define KEYWORDS_PATH   DATA_DIR "/keywords.txt"
+#define KEYWORDS_PATH_DE DATA_DIR "/keywords_de.txt"
+#define KEYWORDS_PATH_EN DATA_DIR "/keywords_en.txt"
 #define MAX_KEYWORDS    200   // max words loaded from file
 #define KEYWORD_WORD_LEN 32   // max chars per keyword
 #define SUGGEST_MAX       5   // candidates held at once
