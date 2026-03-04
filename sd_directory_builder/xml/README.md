@@ -3,6 +3,9 @@
 Converts an OSIS XML Bible file into a folder tree of plain-text verse files
 for use on a Flipper Zero SD card.
 
+OSIS XML Bible files available here
+https://github.com/gratis-bible/bible
+
 ## Output structure
 
 ```
@@ -78,7 +81,6 @@ copy its contents.
 
 ## Notes
 
-- On Windows you may need to use `python` instead of `python3`.
 - The script requires no third-party packages — only the Python standard library.
 - Supported XML format: OSIS 2.1.1 (the same format used by the Free Bible
   Software Group / ZefToOsis encoder).
