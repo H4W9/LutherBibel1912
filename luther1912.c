@@ -497,6 +497,7 @@ void suggestion_fill(App* app) {
 
     app->suggest_count = 0;
     app->suggest_sel   = 0;
+    app->cursor_pos    = app->search_len;  // cursor moves to end of filled word
 }
 
 // Returns the root path for the currently selected translation's content.
@@ -552,6 +553,40 @@ void translations_scan(App* app) {
     }
     storage_dir_close(dir);
     storage_file_free(dir);
+}
+
+// Scan which of the 4 canonical sections actually exist on SD for the current
+// translation. Populates avail_sections[] and avail_section_count.
+// Also clamps section_idx to a valid available section.
+void rebuild_section_list(App* app) {
+    app->avail_section_count = 0;
+    char tdir[120];
+    translation_data_dir(app, tdir, sizeof(tdir));
+
+    for(uint8_t s = 0; s < 4; s++) {
+        char probe[200];
+        snprintf(probe, sizeof(probe), "%s/%s", tdir, SECTION_ORDER[s]);
+        File* f = storage_file_alloc(app->storage);
+        bool exists = storage_dir_open(f, probe);
+        if(exists) {
+            storage_dir_close(f);
+            app->avail_sections[app->avail_section_count++] = s;
+        }
+        storage_file_free(f);
+    }
+
+    // If nothing found fall back to showing all sections (handles flat layout)
+    if(app->avail_section_count == 0) {
+        for(uint8_t s = 0; s < 4; s++) app->avail_sections[s] = s;
+        app->avail_section_count = 4;
+    }
+
+    // Clamp section_idx to a valid available entry
+    bool found = false;
+    for(uint8_t i = 0; i < app->avail_section_count; i++) {
+        if(app->avail_sections[i] == app->section_idx) { found = true; break; }
+    }
+    if(!found) app->section_idx = app->avail_sections[0];
 }
 
 void rebuild_book_list(App* app) {
@@ -1246,7 +1281,7 @@ static const char* const ABOUT_LINES[] = {
     "- - - - Settings - - - - ",
     "   Up/Down = move row",
     "   Left/Right = toggle",
-    "   Long-OK = font list",
+    "   Long-OK = show list",
     "   OK = save & close",
     "- - - - Bookmarks - - - -",
     "   Up/Down = move",
@@ -1406,7 +1441,7 @@ static void input_cb(InputEvent* ev, void* ctx) {
 // Input: Menu
 
 static void on_menu(App* app, InputEvent* ev) {
-    // Long-press OK -> Settings (quick shortcut still works)
+    // Long-press OK -> Settings
     if(ev->type == InputTypeLong && ev->key == InputKeyOk) {
         app->settings_sel        = (app->translation_count > 1) ?
                                    SettingsRowTranslation : SettingsRowFont;
@@ -1414,9 +1449,15 @@ static void on_menu(App* app, InputEvent* ev) {
         app->settings_font_open  = false;
         app->settings_trans_open = false;
         app->settings_long_consumed = false;
+        app->menu_long_consumed  = true;
         app->view = ViewSettings;
         return;
     }
+    if(ev->type == InputTypeRelease && ev->key == InputKeyOk) {
+        app->menu_long_consumed = false;
+        return;
+    }
+    if(app->menu_long_consumed) return;
 
     // Long-press Left/Right on Chapter or Verse row: engage fast scroll (step 5)
     if(ev->type == InputTypeLong &&
@@ -1452,14 +1493,19 @@ static void on_menu(App* app, InputEvent* ev) {
 
     case InputKeyLeft:
         switch(app->sel_row) {
-        case RowSection:
-            app->section_idx = (app->section_idx > 0) ?
-                app->section_idx - 1 : 3;
+        case RowSection: {
+            // Find current position in avail_sections[]
+            uint8_t pos = 0;
+            for(uint8_t i = 0; i < app->avail_section_count; i++)
+                if(app->avail_sections[i] == app->section_idx) { pos = i; break; }
+            pos = (pos > 0) ? pos - 1 : app->avail_section_count - 1;
+            app->section_idx = app->avail_sections[pos];
             app->book_idx = app->chapter_idx = app->verse_idx = 0;
             rebuild_book_list(app);
             refresh_chapter_count(app);
             refresh_verse_count(app);
             break;
+        }
         case RowBook:
             if(app->book_count == 0) break;
             app->book_idx = (app->book_idx > 0) ?
@@ -1485,14 +1531,18 @@ static void on_menu(App* app, InputEvent* ev) {
 
     case InputKeyRight:
         switch(app->sel_row) {
-        case RowSection:
-            app->section_idx = (app->section_idx < 3) ?
-                app->section_idx + 1 : 0;
+        case RowSection: {
+            uint8_t pos = 0;
+            for(uint8_t i = 0; i < app->avail_section_count; i++)
+                if(app->avail_sections[i] == app->section_idx) { pos = i; break; }
+            pos = (pos < app->avail_section_count - 1) ? pos + 1 : 0;
+            app->section_idx = app->avail_sections[pos];
             app->book_idx = app->chapter_idx = app->verse_idx = 0;
             rebuild_book_list(app);
             refresh_chapter_count(app);
             refresh_verse_count(app);
             break;
+        }
         case RowBook:
             if(app->book_count == 0) break;
             app->book_idx = (app->book_idx < app->book_count - 1) ?
@@ -1533,6 +1583,9 @@ static void on_menu(App* app, InputEvent* ev) {
             app->suggest_sel   = 0;
             app->suggest_long_consumed = false;
             app->kb_back_long_consumed = false;
+            app->cursor_pos   = 0;
+            app->text_scroll  = 0;
+            app->cursor_blink = 0;
             app->view = ViewSearch;
             break;
         case RowBookmarks:
@@ -1704,6 +1757,20 @@ static void on_reading(App* app, InputEvent* ev) {
     }
 }
 
+// Called after translation_idx has been updated. Preserves section/book/chapter/verse
+// where possible; only resets what is no longer valid in the new translation.
+static void apply_translation_switch(App* app) {
+    rebuild_section_list(app);
+    // rebuild_section_list already clamped section_idx if the section is missing.
+    // Either way, rebuild the book list for the (possibly unchanged) section.
+    rebuild_book_list(app);
+    // book_idx, chapter_idx, verse_idx are clamped by refresh_* as usual.
+    refresh_chapter_count(app);
+    refresh_verse_count(app);
+    memset(&app->chapter, 0, sizeof(app->chapter));
+    memset(&app->wrap,    0, sizeof(app->wrap));
+}
+
 // Input: Settings
 
 static void on_settings(App* app, InputEvent* ev) {
@@ -1747,16 +1814,7 @@ static void on_settings(App* app, InputEvent* ev) {
         case InputKeyOk:
             if(app->settings_trans_sel != app->translation_idx) {
                 app->translation_idx = app->settings_trans_sel;
-                // Reset position -- content layout may differ between translations
-                app->section_idx = 0;
-                app->book_idx    = 0;
-                app->chapter_idx = 0;
-                app->verse_idx   = 0;
-                rebuild_book_list(app);
-                refresh_chapter_count(app);
-                refresh_verse_count(app);
-                memset(&app->chapter, 0, sizeof(app->chapter));
-                memset(&app->wrap,    0, sizeof(app->wrap));
+                apply_translation_switch(app);
             }
             app->settings_trans_open = false;
             app->settings_long_consumed = false;
@@ -1834,22 +1892,16 @@ static void on_settings(App* app, InputEvent* ev) {
                 app->translation_idx = (app->translation_idx < app->translation_count - 1) ?
                     app->translation_idx + 1 : 0;
             }
-            app->section_idx = 0;
-            app->book_idx    = 0;
-            app->chapter_idx = 0;
-            app->verse_idx   = 0;
-            rebuild_book_list(app);
-            refresh_chapter_count(app);
-            refresh_verse_count(app);
-            memset(&app->chapter, 0, sizeof(app->chapter));
-            memset(&app->wrap,    0, sizeof(app->wrap));
+            apply_translation_switch(app);
         }
         break;
     case InputKeyOk:
         settings_save(app);
+        app->menu_long_consumed = false;
         app->view = ViewMenu;
         break;
     case InputKeyBack:
+        app->menu_long_consumed = false;
         app->view = ViewMenu;
         break;
     default: break;
@@ -1970,7 +2022,8 @@ int32_t luther1912_app(void* p) {
     // Load keyword suggestions
     keywords_load(app);
 
-    // Build book list for restored section
+    // Build available section list for the active translation, then book list
+    rebuild_section_list(app);
     rebuild_book_list(app);
 
     // Clamp restored indices to what's actually on the SD
@@ -1995,7 +2048,7 @@ int32_t luther1912_app(void* p) {
         case ViewAbout:    on_about(app, &ev);    break;
         case ViewError:
             if(ev.type == InputTypeShort && ev.key == InputKeyBack)
-                app->running = false;
+                app->view = ViewMenu;
             break;
         case ViewLoading: break;
         }

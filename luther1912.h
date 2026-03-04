@@ -41,7 +41,7 @@
 
 #define KB_NROWS          3
 #define KB_NCOLS         13
-#define MAX_SEARCH_LEN   24
+#define MAX_SEARCH_LEN   64
 #define MAX_SEARCH_HITS  30
 
 #define KEYWORDS_PATH   DATA_DIR "/keywords.txt"
@@ -159,6 +159,12 @@ typedef struct App {
     bool    kb_long_consumed;  // true while a long-press OK is being held,
                                // suppresses the following repeat/short event
     bool    kb_back_long_consumed; // same for long-press Back in search
+    uint8_t cursor_pos;    // insertion point in search_buf (0..search_len)
+    uint8_t text_scroll;   // how many chars are scrolled off the left of the input field
+    uint8_t cursor_blink;  // incremented each draw frame; blink on bit 3 (~4 frames on/off)
+
+    // Menu long-OK consumed flag (prevents multi-fire into settings)
+    bool    menu_long_consumed;
 
     // Keyword suggestions
     uint16_t kw_count;                                // how many loaded
@@ -192,6 +198,10 @@ typedef struct App {
     uint8_t bm_sel;
     uint8_t bm_scroll;
 
+    // Available sections for the current translation (subset of 0..3)
+    uint8_t avail_sections[4];
+    uint8_t avail_section_count;
+
     // Navigation history: view to return to when pressing Back from reading
     AppView prev_view;
 
@@ -211,6 +221,7 @@ void draw_scrollbar(Canvas* canvas, App* app, uint16_t pos, uint16_t total, uint
 void set_fg(Canvas* canvas, App* app);
 void do_search(App* app);
 void open_reading(App* app);
+void rebuild_section_list(App* app);
 void rebuild_book_list(App* app);
 void refresh_chapter_count(App* app);
 void refresh_verse_count(App* app);

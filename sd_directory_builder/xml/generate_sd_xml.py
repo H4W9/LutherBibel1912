@@ -53,7 +53,7 @@ BOOK_MAP_DE = {
     "Neh":     ("Altes_Testament", "Nehemia"),
     "Esth":    ("Altes_Testament", "Esther"),
     "Job":     ("Altes_Testament", "Hiob"),
-    "Ps":      ("Altes_Testament", "Psalmen"),
+    "Ps":      ("Altes_Testament", "Psalm"),
     "Prov":    ("Altes_Testament", "Spruche"),
     "Eccl":    ("Altes_Testament", "Prediger"),
     "Song":    ("Altes_Testament", "Hoheslied"),
