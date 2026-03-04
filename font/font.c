@@ -40,6 +40,23 @@ void canvas_draw_str_multi(Canvas *canvas, uint8_t x, uint8_t y, const char *str
     elements_multiline_text(canvas, x, y, str);
 }
 
+// Scans for UTF-8 two-byte sequences that encode German umlauts / ß:
+//   0xC3 followed by: 0xA4(ä) 0xB6(ö) 0xBC(ü) 0x84(Ä) 0x96(Ö) 0x9C(Ü) 0x9F(ß)
+bool str_has_umlaut(const char* str) {
+    if(!str) return false;
+    for(const unsigned char* p = (const unsigned char*)str; *p; p++) {
+        if(*p == 0xC3) {
+            unsigned char next = *(p + 1);
+            if(next == 0xA4 || next == 0xB6 || next == 0xBC ||  // ä ö ü
+               next == 0x84 || next == 0x96 || next == 0x9C ||  // Ä Ö Ü
+               next == 0x9F) {                                   // ß
+                return true;
+            }
+        }
+    }
+    return false;
+}
+
 /*
   Fontname: -Misc-Fixed-Medium-R-Normal--6-60-75-75-C-40-ISO10646-1
   Copyright: Public domain font.  Share and enjoy.

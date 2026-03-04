@@ -106,12 +106,12 @@ jobs:
         uses: softprops/action-gh-release@v2
         with:
           draft: true
-          name: "Luther Bibel 1912 v${{ steps.get-version.outputs.version }}"
+          name: "FZ Bible App v${{ steps.get-version.outputs.version }}"
           tag_name: "v${{ steps.get-version.outputs.version }}"
           files: artifacts/*.fap
           fail_on_unmatched_files: false
           body: |
-            ## Luther Bibel 1912 v${{ steps.get-version.outputs.version }}
+            ## FZ Bible App v${{ steps.get-version.outputs.version }}
 
             Built from commit ${{ github.sha }}.
 

@@ -1,6 +1,6 @@
 App(
-    appid="luther1912",
-    name="Luther Bibel 1912",
+    appid="fz_bible_app",
+    name="FZ Bible",
     apptype=FlipperAppType.EXTERNAL,
     entry_point="luther1912_app",
     stack_size=4 * 1024,
@@ -8,7 +8,7 @@ App(
     fap_icon="bible_icon.png",
     fap_icon_assets="icons",
     fap_author="@H4W9",
-    fap_version="1.1",
-    fap_description="Luther Bibel 1912 - Bible study app for Flipper Zero",
+    fap_version="1.2",
+    fap_description="FZ Bibel App - Bible study app for Flipper Zero",
     sources=["luther1912.c", "keyboard/keyboard.c", "font/font.c"],
 )

@@ -1,7 +1,8 @@
 // Luther Bibel 1912 Viewer for Flipper Zero
 // SD card: /ext/apps_data/luther1912/<Section>/<Book>/<Chapter>/verseN.txt
 
-#define APP_VERSION "1.1"
+#define APP_VERSION "1.2"
+#define APP_NAME    "FZ Bible"
 
 #include "font/font.h"
 #include "luther1912.h"
@@ -30,7 +31,19 @@ static const char* const FONT_LABELS[FONT_COUNT] = {
 // Canonical book order (folder names on SD card, underscores for spaces)
 // 79 books: AT(22), Propheten(17), Apokryphen(13), NT(27)
 
-typedef struct { const char* folder; uint8_t section; } BookDef;
+// folder      = German SD folder name (primary; Luther 1912 layout)
+// folder_en   = English SD folder name (NULL if same as German or no EN alias)
+//               Matches the Python script's BOOK_MAP_EN values exactly.
+// display_label = Proper German name with umlauts for on-screen display only.
+//                 NULL means derive the label from the folder name as before
+//                 (underscores → spaces). Used only by canon_book_label() /
+//                 current_book_label(); never used for filesystem paths.
+typedef struct {
+    const char* folder;
+    const char* folder_en;
+    const char* display_label;
+    uint8_t     section;
+} BookDef;
 
 #define SEC_AT  0
 #define SEC_PR  1
@@ -38,98 +51,107 @@ typedef struct { const char* folder; uint8_t section; } BookDef;
 #define SEC_NT  3
 
 static const BookDef CANON_BOOKS[] = {
-    // Altes Testament (1 Mose .. Hohelied)
-    { "1_Mose",          SEC_AT },
-    { "2_Mose",          SEC_AT },
-    { "3_Mose",          SEC_AT },
-    { "4_Mose",          SEC_AT },
-    { "5_Mose",          SEC_AT },
-    { "Josua",           SEC_AT },
-    { "Richter",         SEC_AT },
-    { "Ruth",            SEC_AT },
-    { "1_Samuel",        SEC_AT },
-    { "2_Samuel",        SEC_AT },
-    { "1_Konige",        SEC_AT },
-    { "2_Konige",        SEC_AT },
-    { "1_Chronik",       SEC_AT },
-    { "2_Chronik",       SEC_AT },
-    { "Esra",            SEC_AT },
-    { "Nehemia",         SEC_AT },
-    { "Esther",          SEC_AT },
-    { "Hiob",            SEC_AT },
-    { "Psalm",           SEC_AT },
-    { "Spruche",         SEC_AT },
-    { "Prediger",        SEC_AT },
-    { "Hohelied",        SEC_AT },
-    // Propheten
-    { "Jesaja",          SEC_PR },
-    { "Jeremia",         SEC_PR },
-    { "Klagelieder",     SEC_PR },
-    { "Hesekiel",        SEC_PR },
-    { "Daniel",          SEC_PR },
-    { "Hosea",           SEC_PR },
-    { "Joel",            SEC_PR },
-    { "Amos",            SEC_PR },
-    { "Obadja",          SEC_PR },
-    { "Jona",            SEC_PR },
-    { "Micha",           SEC_PR },
-    { "Nahum",           SEC_PR },
-    { "Habakuk",         SEC_PR },
-    { "Zephanja",        SEC_PR },
-    { "Haggai",          SEC_PR },
-    { "Sacharja",        SEC_PR },
-    { "Maleachi",        SEC_PR },
-    // Neues Testament
-    { "Matthaus",        SEC_NT },
-    { "Markus",          SEC_NT },
-    { "Lukas",           SEC_NT },
-    { "Johannes",        SEC_NT },
-    { "Apostelgeschichte", SEC_NT },
-    { "Romer",           SEC_NT },
-    { "1_Korinther",     SEC_NT },
-    { "2_Korinther",     SEC_NT },
-    { "Galater",         SEC_NT },
-    { "Epheser",         SEC_NT },
-    { "Philipper",       SEC_NT },
-    { "Kolosser",        SEC_NT },
-    { "1_Thessalonicher",SEC_NT },
-    { "2_Thessalonicher",SEC_NT },
-    { "1_Timotheus",     SEC_NT },
-    { "2_Timotheus",     SEC_NT },
-    { "Titus",           SEC_NT },
-    { "Philemon",        SEC_NT },
-    { "Hebraer",         SEC_NT },
-    { "Jakobus",         SEC_NT },
-    { "1_Petrus",        SEC_NT },
-    { "2_Petrus",        SEC_NT },
-    { "1_Johannes",      SEC_NT },
-    { "2_Johannes",      SEC_NT },
-    { "3_Johannes",      SEC_NT },
-    { "Judas",           SEC_NT },
-    { "Offenbarung",     SEC_NT },
-    // Apokryphen
-    { "Judith",          SEC_AP },
-    { "Weisheit",        SEC_AP },
-    { "Tobias",          SEC_AP },
-    { "Sirach",          SEC_AP },
-    { "Baruch",          SEC_AP },
-    { "1_Makkabaer",     SEC_AP },
-    { "2_Makkabaer",     SEC_AP },
-    { "3_Makkabaer",     SEC_AP },
-    { "Zusatze_Esther",SEC_AP },
-    { "Zusatze_Daniel",SEC_AP },
-    { "1_Esdras",        SEC_AP },
-    { "2_Esdras",        SEC_AP },
-    { "Gebet_Manasse", SEC_AP },
+    // { folder, folder_en, display_label, section }
+    // display_label is NULL when the folder name (underscores->spaces) is already correct
+    // Altes Testament / Old Testament
+    { "1_Mose",           "Genesis",           "1 Mose",                  SEC_AT },
+    { "2_Mose",           "Exodus",            "2 Mose",                  SEC_AT },
+    { "3_Mose",           "Leviticus",         "3 Mose",                  SEC_AT },
+    { "4_Mose",           "Numbers",           "4 Mose",                  SEC_AT },
+    { "5_Mose",           "Deuteronomy",       "5 Mose",                  SEC_AT },
+    { "Josua",            "Joshua",            NULL,                      SEC_AT },
+    { "Richter",          "Judges",            NULL,                      SEC_AT },
+    { "Ruth",             NULL,                NULL,                      SEC_AT },
+    { "1_Samuel",         NULL,                "1 Samuel",                SEC_AT },
+    { "2_Samuel",         NULL,                "2 Samuel",                SEC_AT },
+    { "1_Konige",         "1_Kings",           "1 K\xc3\xb6" "nige",       SEC_AT },
+    { "2_Konige",         "2_Kings",           "2 K\xc3\xb6" "nige",       SEC_AT },
+    { "1_Chronik",        "1_Chronicles",      "1 Chronik",               SEC_AT },
+    { "2_Chronik",        "2_Chronicles",      "2 Chronik",               SEC_AT },
+    { "Esra",             "Ezra",              NULL,                      SEC_AT },
+    { "Nehemia",          "Nehemiah",          NULL,                      SEC_AT },
+    { "Esther",           NULL,                NULL,                      SEC_AT },
+    { "Hiob",             "Job",               NULL,                      SEC_AT },
+    { "Psalm",            "Psalms",            NULL,                      SEC_AT },
+    { "Spruche",          "Proverbs",          "Spr\xc3\xbc" "che",        SEC_AT },
+    { "Prediger",         "Ecclesiastes",      NULL,                      SEC_AT },
+    { "Hohelied",         "Song_of_Solomon",   NULL,                      SEC_AT },
+    // Propheten / Prophets
+    { "Jesaja",           "Isaiah",            NULL,                      SEC_PR },
+    { "Jeremia",          "Jeremiah",          NULL,                      SEC_PR },
+    { "Klagelieder",      "Lamentations",      NULL,                      SEC_PR },
+    { "Hesekiel",         "Ezekiel",           NULL,                      SEC_PR },
+    { "Daniel",           NULL,                NULL,                      SEC_PR },
+    { "Hosea",            NULL,                NULL,                      SEC_PR },
+    { "Joel",             NULL,                NULL,                      SEC_PR },
+    { "Amos",             NULL,                NULL,                      SEC_PR },
+    { "Obadja",           "Obadiah",           NULL,                      SEC_PR },
+    { "Jona",             "Jonah",             NULL,                      SEC_PR },
+    { "Micha",            "Micah",             NULL,                      SEC_PR },
+    { "Nahum",            NULL,                NULL,                      SEC_PR },
+    { "Habakuk",          "Habakkuk",          NULL,                      SEC_PR },
+    { "Zephanja",         "Zephaniah",         NULL,                      SEC_PR },
+    { "Haggai",           NULL,                NULL,                      SEC_PR },
+    { "Sacharja",         "Zechariah",         NULL,                      SEC_PR },
+    { "Maleachi",         "Malachi",           NULL,                      SEC_PR },
+    // Neues Testament / New Testament
+    { "Matthaus",         "Matthew",           "Matth\xc3\xa4" "us",       SEC_NT },
+    { "Markus",           "Mark",              NULL,                      SEC_NT },
+    { "Lukas",            "Luke",              NULL,                      SEC_NT },
+    { "Johannes",         "John",              NULL,                      SEC_NT },
+    { "Apostelgeschichte","Acts",              NULL,                      SEC_NT },
+    { "Romer",            "Romans",            "R\xc3\xb6" "mer",          SEC_NT },
+    { "1_Korinther",      "1_Corinthians",     "1 Korinther",             SEC_NT },
+    { "2_Korinther",      "2_Corinthians",     "2 Korinther",             SEC_NT },
+    { "Galater",          "Galatians",         NULL,                      SEC_NT },
+    { "Epheser",          "Ephesians",         NULL,                      SEC_NT },
+    { "Philipper",        "Philippians",       NULL,                      SEC_NT },
+    { "Kolosser",         "Colossians",        NULL,                      SEC_NT },
+    { "1_Thessalonicher", "1_Thessalonians",   "1 Thessalonicher",        SEC_NT },
+    { "2_Thessalonicher", "2_Thessalonians",   "2 Thessalonicher",        SEC_NT },
+    { "1_Timotheus",      "1_Timothy",         "1 Timotheus",             SEC_NT },
+    { "2_Timotheus",      "2_Timothy",         "2 Timotheus",             SEC_NT },
+    { "Titus",            NULL,                NULL,                      SEC_NT },
+    { "Philemon",         NULL,                NULL,                      SEC_NT },
+    { "Hebraer",          "Hebrews",           "Hebr\xc3\xa4" "er",        SEC_NT },
+    { "Jakobus",          "James",             NULL,                      SEC_NT },
+    { "1_Petrus",         "1_Peter",           "1 Petrus",                SEC_NT },
+    { "2_Petrus",         "2_Peter",           "2 Petrus",                SEC_NT },
+    { "1_Johannes",       "1_John",            "1 Johannes",              SEC_NT },
+    { "2_Johannes",       "2_John",            "2 Johannes",              SEC_NT },
+    { "3_Johannes",       "3_John",            "3 Johannes",              SEC_NT },
+    { "Judas",            "Jude",              NULL,                      SEC_NT },
+    { "Offenbarung",      "Revelation",        NULL,                      SEC_NT },
+    // Apokryphen / Apocrypha
+    { "Judith",           NULL,                NULL,                      SEC_AP },
+    { "Weisheit",         "Wisdom_of_Solomon", NULL,                      SEC_AP },
+    { "Tobias",           "Tobit",             NULL,                      SEC_AP },
+    { "Sirach",           NULL,                NULL,                      SEC_AP },
+    { "Baruch",           NULL,                NULL,                      SEC_AP },
+    { "1_Makkabaer",      "1_Maccabees",       "1 Makkab\xc3\xa4" "er",   SEC_AP },
+    { "2_Makkabaer",      "2_Maccabees",       "2 Makkab\xc3\xa4" "er",   SEC_AP },
+    { "3_Makkabaer",      NULL,                "3 Makkab\xc3\xa4" "er",   SEC_AP },
+    { "Zusatze_Esther",   "Additions_to_Esther","Zus\xc3\xa4" "tze Esther",SEC_AP },
+    { "Zusatze_Daniel",   "Additions_to_Daniel","Zus\xc3\xa4" "tze Daniel",SEC_AP },
+    { "1_Esdras",         NULL,                "1 Esdras",                SEC_AP },
+    { "2_Esdras",         NULL,                "2 Esdras",                SEC_AP },
+    { "Gebet_Manasse",    "Prayer_of_Manasseh","Gebet Manasse",           SEC_AP },
 };
 #define CANON_BOOK_COUNT  ((uint8_t)(sizeof(CANON_BOOKS)/sizeof(CANON_BOOKS[0])))
 
-// Canonical section folder names in order
+// German section folder names (primary layout – Luther 1912, etc.)
 static const char* const SECTION_ORDER[4] = {
     "Altes_Testament",
     "Propheten",
     "Apokryphen",
     "Neues_Testament",
+};
+// English section folder names (generated by the Python script with --lang en)
+static const char* const SECTION_ORDER_EN[4] = {
+    "Old_Testament",
+    "Prophets",
+    "Apocrypha",
+    "New_Testament",
 };
 static const char* const SECTION_LABELS[4] = {
     "Altes Testament",
@@ -137,6 +159,25 @@ static const char* const SECTION_LABELS[4] = {
     "Apokryphen",
     "Neues Testament",
 };
+
+// Per-translation flag: true if the active translation uses English folder names.
+// Detected once in rebuild_section_list() by probing which name exists on disk.
+// Stored in App so every path builder can query it cheaply.
+//
+// Helper: return the actual section folder name to use for section index s.
+static const char* section_folder(App* app, uint8_t s) {
+    return app->section_lang_en ? SECTION_ORDER_EN[s] : SECTION_ORDER[s];
+}
+
+// Helper: return the actual book folder name to use for a canonical book index.
+// Tries the German name first; if that is absent (folder_en != NULL and the
+// caller is on an EN-layout card) it falls back to the English name.
+// NOTE: path probing is done by the caller; this just selects the name.
+static const char* book_folder_name(App* app, uint8_t canon_idx) {
+    if(app->section_lang_en && CANON_BOOKS[canon_idx].folder_en != NULL)
+        return CANON_BOOKS[canon_idx].folder_en;
+    return CANON_BOOKS[canon_idx].folder;
+}
 
 // Dark mode color helpers
 static void set_bg(Canvas* canvas, App* app) {
@@ -311,13 +352,42 @@ static void bookmark_toggle(App* app) {
     bookmarks_save(app);
 }
 
-// Convert a canonical book folder name to a display label (underscores → spaces)
-static void canon_book_label(uint8_t canon_idx, char* buf, size_t len) {
-    const char* src = CANON_BOOKS[canon_idx].folder;
-    size_t i;
-    for(i = 0; i < len - 1 && src[i]; i++)
-        buf[i] = (src[i] == '_') ? ' ' : src[i];
-    buf[i] = '\0';
+// ============================================================
+// UI font helper
+// ============================================================
+
+// Use instead of canvas_set_font(canvas, FontSecondary) whenever the string
+// being drawn might contain umlauts. If it does, falls back to the custom font
+// defined by UMLAUT_FALLBACK_FONT (set in font.h — change it there to resize).
+// If the string is clean ASCII, uses the standard built-in FontSecondary.
+void set_ui_font(Canvas* canvas, const char* str) {
+    if(str_has_umlaut(str)) {
+        canvas_set_font_custom(canvas, UMLAUT_FALLBACK_FONT);
+    } else {
+        canvas_set_font(canvas, FontSecondary);
+    }
+}
+
+// ============================================================
+// Book / section display labels
+// ============================================================
+
+// Convert a canonical book index to a display label for the UI.
+// Prefers display_label (with proper umlauts) when set; otherwise falls back
+// to deriving the label from the filesystem folder name (underscores → spaces).
+static void canon_book_label(App* app, uint8_t canon_idx, char* buf, size_t len) {
+    if(CANON_BOOKS[canon_idx].display_label != NULL) {
+        // Use the pre-composed display name (may contain umlauts)
+        strncpy(buf, CANON_BOOKS[canon_idx].display_label, len - 1);
+        buf[len - 1] = '\0';
+    } else {
+        // Fall back: derive from the appropriate folder name
+        const char* src = book_folder_name(app, canon_idx);
+        size_t i;
+        for(i = 0; i < len - 1 && src[i]; i++)
+            buf[i] = (src[i] == '_') ? ' ' : src[i];
+        buf[i] = '\0';
+    }
 }
 
 
@@ -332,33 +402,37 @@ static const char* const BUILTIN_KEYWORDS[] = {
     // People & patriarchs
     "Abraham","Adam","Apostel","Daniel","David","Elia","Elija","Esau",
     "Eva","Hagar","Hiob","Isaak","Jakob","Jesus","Johannes","Josef",
-    "Josua","Judas","Kain","Lukas","Maria","Markus","Matthaus","Mose",
+    "Josua","Judas","Kain","Lukas","Maria","Markus",
+    "Matth\xc3\xa4" "us","Mose",
     "Nimrod","Noah","Paulus","Petrus","Salomo","Samuel","Sara","Simeon",
     // Titles & roles
-    "Christus","Herr","Heiland","Koenig","Priester","Prophet","Richter",
-    "Apostel","Juenger","Pharisaeer","Schriftgelehrter","Hohepriester",
+    "Christus","Herr","Heiland","K\xc3\xb6" "nig","Priester","Prophet","Richter",
+    "J\xc3\xbc" "nger","Hohepriester",
+    "Schriftgelehrter","Pharis\xc3\xa4" "er",
     "Knecht","Hirte","Levit","Nazarener",
     // God & faith
     "Glaube","Gnade","Gott","Gottesdienst","Heilig","Hoffnung","Liebe",
-    "Barmherzigkeit","Erbarmen","Erloesung","Ewigkeit","Freiheit",
+    "Barmherzigkeit","Erbarmen","Erl\xc3\xb6" "sung","Ewigkeit","Freiheit",
     "Gerechtigkeit","Herrlichkeit","Heiligkeit","Lobpreis","Treue",
     "Vergebung","Vorsehung","Wahrheit","Weisheit","Wunder","Zeichen",
     // Worship & practice
     "Altar","Amen","Gebet","Gebot","Gesetz","Gottesdienst","Lobpreis",
     "Opfer","Sabbat","Segen","Taufe","Tempel","Zehnten","Beschneidung",
-    "Beichte","Busse","Dankopfer","Fastentag","Gelübde","Opferlamm",
+    "Beichte","Bu\xc3\x9f" "e","Dankopfer","Fastentag",
+    "Gel\xc3\xbc" "bde","Opferlamm",
     // Salvation & sin
-    "Errettung","Sünde","Suende","Schuld","Reue","Umkehr","Busse",
-    "Gericht","Heil","Verdammnis","Versöhnung","Versoenung","Strafe",
+    "Errettung","S\xc3\xbc" "nde","Schuld","Reue","Umkehr","Bu\xc3\x9f" "e",
+    "Gericht","Heil","Verdammnis",
+    "Vers\xc3\xb6" "hnung","Strafe",
     // Creation & nature
     "Erde","Feuer","Himmel","Licht","Meer","Nacht","Tag","Wasser",
     "Wind","Berg","Fluss","Garten","Land","Stern","Sonne","Mond",
-    "Wolke","Regen","Wüste","Wueste","Tal","Welle","Feld","Baum",
+    "Wolke","Regen","W\xc3\xbc" "ste","Tal","Welle","Feld","Baum",
     // Objects & places
     "Arche","Brot","Grab","Kreuz","Lamm","Schwert","Stein","Stab",
-    "Bundeslade","Jerusalem","Israel","Zion","Bethlehem","Galiläa",
-    "Galilaea","Jordan","Kapernaum","Nazareth","Aegypten","Babylon",
-    "Sinai","Golgatha",
+    "Bundeslade","Jerusalem","Israel","Zion","Bethlehem",
+    "Galil\xc3\xa4" "a","Jordan","Kapernaum","Nazareth",
+    "\xc3\x84" "gypten","Babylon","Sinai","Golgatha",
     // Body & life
     "Auge","Blut","Bruder","Hand","Herz","Leben","Leib","Mutter",
     "Name","Seele","Sohn","Tod","Vater","Tochter","Schwester","Geist",
@@ -366,17 +440,18 @@ static const char* const BUILTIN_KEYWORDS[] = {
     // Key concepts
     "Buch","Engel","Evangelium","Friede","Gemeinde","Gleichnis","Lob",
     "Psalm","Reich","Trost","Volk","Wort","Zeugnis","Auferstehung",
-    "Bescheidenheit","Demut","Einheit","Gehorsam","Geduld","Güte","Güete",
-    "Harfe","Hosanna","Hunger","Kraft","Langmut","Nächstenliebe",
-    "Naechstenliebe","Retter","Teufel","Traum","Vision",
+    "Bescheidenheit","Demut","Einheit","Gehorsam","Geduld",
+    "G\xc3\xbc" "te","Harfe","Hosanna","Hunger","Kraft","Langmut",
+    "N\xc3\xa4" "chstenliebe","Retter","Teufel","Traum","Vision",
     // Common German search words
     "nicht","und","aber","auch","denn","wie","wenn","dass","alle",
-    "alles","viele","gross","gut","neu","alt","heilig","ewig","wahr",
-    "gross","klein","stark","schwach","arm","reich","gerecht","bose",
-    "böse","fromm","weise","geduldig","treu","bereit","lebendig",
+    "alles","viele","gro\xc3\x9f","gut","neu","alt","heilig","ewig","wahr",
+    "klein","stark","schwach","arm","reich","gerecht",
+    "b\xc3\xb6" "se","fromm","weise","geduldig","treu","bereit","lebendig",
     "Anfang","Ende","Zeit","Jahr","Morgen","Abend",
     "Weg","Welt","Feind","Kampf","Ruf","Ehe","Frieden","Leid","Freude",
 };
+
 #define BUILTIN_KW_COUNT ((uint16_t)(sizeof(BUILTIN_KEYWORDS)/sizeof(BUILTIN_KEYWORDS[0])))
 
 // Static storage for keyword table -- kept out of App to avoid bloating the
@@ -531,12 +606,24 @@ void translations_scan(App* app) {
         if(fname[0] == '.') continue;
 
         // Check whether this sub-directory contains at least one section folder
+        // (German layout OR English layout from the Python script)
         bool is_translation = false;
         for(uint8_t s = 0; s < 4 && !is_translation; s++) {
             char probe[200];
+            // Try German name
             snprintf(probe, sizeof(probe), "%s/%s/%s",
                      DATA_DIR, fname, SECTION_ORDER[s]);
             File* pf = storage_file_alloc(app->storage);
+            if(storage_dir_open(pf, probe)) {
+                is_translation = true;
+                storage_dir_close(pf);
+            }
+            storage_file_free(pf);
+            if(is_translation) break;
+            // Try English name
+            snprintf(probe, sizeof(probe), "%s/%s/%s",
+                     DATA_DIR, fname, SECTION_ORDER_EN[s]);
+            pf = storage_file_alloc(app->storage);
             if(storage_dir_open(pf, probe)) {
                 is_translation = true;
                 storage_dir_close(pf);
@@ -560,12 +647,40 @@ void translations_scan(App* app) {
 // Also clamps section_idx to a valid available section.
 void rebuild_section_list(App* app) {
     app->avail_section_count = 0;
+    app->section_lang_en = false;
     char tdir[120];
     translation_data_dir(app, tdir, sizeof(tdir));
 
+    // Detect language: probe for a German section first, then English.
+    // Whichever is found first wins for the whole translation.
+    bool lang_detected = false;
+    for(uint8_t s = 0; s < 4 && !lang_detected; s++) {
+        char probe[200];
+        // Try German
+        snprintf(probe, sizeof(probe), "%s/%s", tdir, SECTION_ORDER[s]);
+        File* f = storage_file_alloc(app->storage);
+        if(storage_dir_open(f, probe)) {
+            storage_dir_close(f);
+            app->section_lang_en = false;
+            lang_detected = true;
+        }
+        storage_file_free(f);
+        if(lang_detected) break;
+        // Try English
+        snprintf(probe, sizeof(probe), "%s/%s", tdir, SECTION_ORDER_EN[s]);
+        f = storage_file_alloc(app->storage);
+        if(storage_dir_open(f, probe)) {
+            storage_dir_close(f);
+            app->section_lang_en = true;
+            lang_detected = true;
+        }
+        storage_file_free(f);
+    }
+
+    // Now scan all four canonical sections using the detected language
     for(uint8_t s = 0; s < 4; s++) {
         char probe[200];
-        snprintf(probe, sizeof(probe), "%s/%s", tdir, SECTION_ORDER[s]);
+        snprintf(probe, sizeof(probe), "%s/%s", tdir, section_folder(app, s));
         File* f = storage_file_alloc(app->storage);
         bool exists = storage_dir_open(f, probe);
         if(exists) {
@@ -603,15 +718,13 @@ void rebuild_book_list(App* app) {
 
 static const char* current_book_folder(App* app) {
     if(app->book_count == 0) return "";
-    return CANON_BOOKS[app->book_list[app->book_idx]].folder;
+    return book_folder_name(app, app->book_list[app->book_idx]);
 }
 
 static void current_book_label(App* app, char* buf, size_t len) {
-    const char* src = current_book_folder(app);
-    size_t i;
-    for(i = 0; i < len - 1 && src[i]; i++)
-        buf[i] = (src[i] == '_') ? ' ' : src[i];
-    buf[i] = '\0';
+    if(app->book_count == 0) { buf[0] = '\0'; return; }
+    uint8_t canon_idx = app->book_list[app->book_idx];
+    canon_book_label(app, canon_idx, buf, len);
 }
 
 // Directory helpers
@@ -645,7 +758,7 @@ static void build_chapter_path(App* app, char* buf, size_t buf_len) {
     translation_data_dir(app, tdir, sizeof(tdir));
     snprintf(buf, buf_len, "%s/%s/%s/%d",
              tdir,
-             SECTION_ORDER[app->section_idx],
+             section_folder(app, app->section_idx),
              current_book_folder(app),
              app->chapter_idx + 1);
 }
@@ -658,7 +771,7 @@ void refresh_chapter_count(App* app) {
     char path[200];
     snprintf(path, sizeof(path), "%s/%s/%s",
              tdir,
-             SECTION_ORDER[app->section_idx],
+             section_folder(app, app->section_idx),
              current_book_folder(app));
     app->chapter_count = count_chapter_dirs(app->storage, path);
     if(app->chapter_idx >= app->chapter_count && app->chapter_count > 0)
@@ -724,7 +837,7 @@ void do_search(App* app) {
     char book_path[200];
     snprintf(book_path, sizeof(book_path), "%s/%s/%s",
              tdir,
-             SECTION_ORDER[app->section_idx],
+             section_folder(app, app->section_idx),
              current_book_folder(app));
 
     uint8_t chap_count = count_chapter_dirs(app->storage, book_path);
@@ -886,7 +999,11 @@ void draw_hdr(Canvas* canvas, const char* title) {
     canvas_set_color(canvas, ColorBlack);
     canvas_draw_box(canvas, 0, 0, SCREEN_W, HDR_H);
     canvas_set_color(canvas, ColorWhite);
-    canvas_set_font(canvas, FontPrimary);
+    if(str_has_umlaut(title)) {
+        canvas_set_font_custom(canvas, UMLAUT_FALLBACK_FONT_HDR);
+    } else {
+        canvas_set_font(canvas, FontPrimary);
+    }
     canvas_draw_str_aligned(canvas, SCREEN_W / 2, 1,
                             AlignCenter, AlignTop, title);
     canvas_set_color(canvas, ColorBlack);
@@ -914,7 +1031,7 @@ static void draw_menu(Canvas* canvas, App* app) {
         canvas_set_color(canvas, ColorBlack);
         canvas_draw_box(canvas, 0, 0, SCREEN_W, SCREEN_H);
     }
-    draw_hdr(canvas, "Luther Bibel 1912");
+    draw_hdr(canvas, APP_NAME " v" APP_VERSION);
 
     set_fg(canvas, app);
     canvas_set_font(canvas, FontSecondary);
@@ -963,6 +1080,7 @@ static void draw_menu(Canvas* canvas, App* app) {
             static const char* const picker_labels[4] = {
                 "Section", "Book", "Chapter", "Verse"
             };
+            canvas_set_font(canvas, FontSecondary);
             canvas_draw_str(canvas, 2, y + 8, picker_labels[r]);
 
             char val[64];
@@ -987,6 +1105,7 @@ static void draw_menu(Canvas* canvas, App* app) {
                     snprintf(val, sizeof(val), "< %d >",
                              (int)app->verse_idx);
             }
+            set_ui_font(canvas, val);
             canvas_draw_str_aligned(canvas, SCREEN_W - SB_W - 3, y + 8,
                                     AlignRight, AlignBottom, val);
             break;
@@ -1250,20 +1369,20 @@ static void draw_settings(Canvas* canvas, App* app) {
 // Scene: About
 
 static const char* const ABOUT_LINES[] = {
-    "Luther Bible 1912  v" APP_VERSION,
+    APP_NAME " v" APP_VERSION,
     "---------------------",
-    "   Published in 1912; ",
-    "     public domain.",
+    "  Multi-translation",
+    "   Bible study app.",
     "---------------------",
     "SD card directory setup:",
     "  /ext/apps_data/",
-    "   luther1912/",
+    "   fz_bible_app/",
     "  <Translation>/",
     "  <Section>/<Book>/",
     "   <Chap>/verseN.txt",
     "  (1 translation: place",
     "   sections directly in",
-    "   luther1912/ folder)",
+    "   fz_bible_app/ folder)",
     "---------------------",
     "CONTROLS",
     "- - - - Main Menu - - - -",
@@ -1378,13 +1497,15 @@ static void draw_bookmarks(Canvas* canvas, App* app) {
 
         // Build reference label: "BookName ch:v"
         char blabel[14];
-        canon_book_label(app->bookmarks[si].canon_book, blabel, sizeof(blabel));
+        canon_book_label(app, app->bookmarks[si].canon_book, blabel, sizeof(blabel));
         char ref[32];
         snprintf(ref, sizeof(ref), "%s %d:%d",
                  blabel,
                  (int)(app->bookmarks[si].chapter + 1),
                  (int)app->bookmarks[si].verse);
+        set_ui_font(canvas, ref);
         canvas_draw_str(canvas, 4, y + 8, ref);
+        canvas_set_font(canvas, FontSecondary);  // restore for next iteration
         set_fg(canvas, app);
     }
 
@@ -1398,7 +1519,7 @@ static void draw_loading(Canvas* canvas, App* app) {
         canvas_set_color(canvas, ColorBlack);
         canvas_draw_box(canvas, 0, 0, SCREEN_W, SCREEN_H);
     }
-    draw_hdr(canvas, "Luther Bibel 1912");
+    draw_hdr(canvas, APP_NAME " v" APP_VERSION);
     set_fg(canvas, app);
     canvas_set_font(canvas, FontSecondary);
     canvas_draw_str_aligned(canvas, SCREEN_W / 2, SCREEN_H / 2 + 4,
@@ -1486,9 +1607,11 @@ static void on_menu(App* app, InputEvent* ev) {
     switch(ev->key) {
     case InputKeyUp:
         if(app->sel_row > 0) app->sel_row--;
+        else app->sel_row = (MenuRow)(MENU_ROWS - 1);  // wrap to bottom
         break;
     case InputKeyDown:
         if((uint8_t)app->sel_row < MENU_ROWS - 1) app->sel_row++;
+        else app->sel_row = (MenuRow)0;  // wrap to top
         break;
 
     case InputKeyLeft:
@@ -1939,9 +2062,11 @@ static void on_bookmarks(App* app, InputEvent* ev) {
     switch(ev->key) {
     case InputKeyUp:
         if(app->bm_sel > 0) app->bm_sel--;
+        else app->bm_sel = app->bm_count - 1;  // wrap to bottom
         break;
     case InputKeyDown:
         if(app->bm_sel < app->bm_count - 1) app->bm_sel++;
+        else app->bm_sel = 0;  // wrap to top
         break;
     case InputKeyOk:
         if(app->bm_count == 0) break;

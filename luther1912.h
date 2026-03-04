@@ -13,7 +13,7 @@
 
 #define SCREEN_W        128
 #define SCREEN_H         64
-#define DATA_DIR        "/ext/apps_data/luther1912"
+#define DATA_DIR        "/ext/apps_data/fz_bible_app"
 #define SETTINGS_PATH   DATA_DIR "/settings.txt"
 
 #define BOOKMARKS_PATH  DATA_DIR "/bookmarks.txt"
@@ -201,6 +201,7 @@ typedef struct App {
     // Available sections for the current translation (subset of 0..3)
     uint8_t avail_sections[4];
     uint8_t avail_section_count;
+    bool    section_lang_en;  // true when active translation uses English folder names
 
     // Navigation history: view to return to when pressing Back from reading
     AppView prev_view;
@@ -219,6 +220,7 @@ typedef struct App {
 void draw_hdr(Canvas* canvas, const char* title);
 void draw_scrollbar(Canvas* canvas, App* app, uint16_t pos, uint16_t total, uint8_t vis);
 void set_fg(Canvas* canvas, App* app);
+void set_ui_font(Canvas* canvas, const char* str);
 void do_search(App* app);
 void open_reading(App* app);
 void rebuild_section_list(App* app);

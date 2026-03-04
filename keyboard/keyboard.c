@@ -23,15 +23,15 @@ const char kb_page1[KB_NROWS][KB_NCOLS] = {
 // Page 2: umlauts and special characters (matches reference implementation)
 typedef struct { const char* label; } SpecialKey;
 static const SpecialKey kb_page2[KB_NROWS][KB_NCOLS] = {
-    { {"\xC3\x84"},{"\xC3\xA4"},{"\xC3\x96"},{"\xC3\xB6"},{"\xC3\x9C"},{"\xC3\xBC"},
-      {"\xC3\x9F"},{"\xC2\xA1"},{"\xC2\xBF"},{"\xC2\xAB"},{"\xC2\xBB"},
-      {"\xE2\x80\x98"},{"\xE2\x80\x99"} },
-    { {"\xE2\x80\x9C"},{"\xE2\x80\x9D"},{"\xE2\x80\x93"},{"\xE2\x80\x94"},
-      {"\xC3\xA9"},{"\xC3\xA8"},{"\xC3\xAA"},{"\xC3\xAB"},{"\xC3\xAF"},
-      {"\xC3\xAE"},{"\xC3\xA0"},{"\xC3\xA2"},{"\xC3\xB5"} },
     { {"\xC3\xB1"},{"\xC3\xA7"},{"\xC3\xBF"},{"\xC3\xB8"},{"\xC3\xA5"},
       {"\xC3\xA6"},{"\xC3\x90"},{"\xC3\xBE"},{"\xC2\xA3"},{"\xC2\xA5"},
       {"\xC2\xA9"},{"\xC2\xAE"},{"\xC2\xB0"} },
+    { {"\xE2\x80\x9C"},{"\xE2\x80\x9D"},{"\xE2\x80\x93"},{"\xE2\x80\x94"},
+      {"\xC3\xA9"},{"\xC3\xA8"},{"\xC3\xAA"},{"\xC3\xAB"},{"\xC3\xAF"},
+      {"\xC3\xAE"},{"\xC3\xA0"},{"\xC3\xA2"},{"\xC3\xB5"} },
+    { {"\xC3\x84"},{"\xC3\xA4"},{"\xC3\x96"},{"\xC3\xB6"},{"\xC3\x9C"},{"\xC3\xBC"},
+      {"\xC3\x9F"},{"\xC2\xA1"},{"\xC2\xBF"},{"\xC2\xAB"},{"\xC2\xBB"},
+      {"\xE2\x80\x98"},{"\xE2\x80\x99"} },
 };
 
 // Maps each of the 13 keyboard columns to the nearest special button (0-4)
@@ -302,7 +302,9 @@ void draw_search_results(Canvas* canvas, App* app) {
             canvas_set_color(canvas, ColorBlack);
         }
 
+        set_ui_font(canvas, app->hits[si].ref);
         canvas_draw_str(canvas, 4, y + 8, app->hits[si].ref);
+        canvas_set_font(canvas, FontSecondary);  // restore for next iteration
         canvas_set_color(canvas, ColorBlack);
     }
 
@@ -530,9 +532,11 @@ void on_search_results(App* app, InputEvent* ev) {
     switch(ev->key) {
     case InputKeyUp:
         if(app->hit_sel > 0) app->hit_sel--;
+        else app->hit_sel = app->hit_count - 1;  // wrap to bottom
         break;
     case InputKeyDown:
         if(app->hit_sel < app->hit_count - 1) app->hit_sel++;
+        else app->hit_sel = 0;  // wrap to top
         break;
     case InputKeyOk:
         if(app->hit_count == 0) break;
