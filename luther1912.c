@@ -1,7 +1,7 @@
 // Luther Bibel 1912 Viewer for Flipper Zero
 // SD card: /ext/apps_data/luther1912/<Section>/<Book>/<Chapter>/verseN.txt
 
-#define APP_VERSION "1.0"
+#define APP_VERSION "1.1"
 
 #include "font/font.h"
 #include "luther1912.h"
@@ -174,13 +174,14 @@ static void settings_save(App* app) {
     }
     char buf[128];
     int len = snprintf(buf, sizeof(buf),
-        "font=%d\ndark=%d\nsec=%d\nbook=%d\nchap=%d\nverse=%d\n",
+        "font=%d\ndark=%d\nsec=%d\nbook=%d\nchap=%d\nverse=%d\ntrans=%d\n",
         (int)app->font_choice,
         (int)app->dark_mode,
         (int)app->section_idx,
         (int)app->book_idx,
         (int)app->chapter_idx,
-        (int)app->verse_idx);
+        (int)app->verse_idx,
+        (int)app->translation_idx);
     if(len > 0) storage_file_write(f, buf, (uint16_t)len);
     storage_file_close(f);
     storage_file_free(f);
@@ -213,6 +214,7 @@ static void settings_load(App* app) {
     if((p = strstr(buf, "book="))  != NULL) { int v=atoi(p+5); if(v>=0&&v<MAX_BOOKS) app->book_idx=(uint8_t)v; }
     if((p = strstr(buf, "chap="))  != NULL) { int v=atoi(p+5); if(v>=0&&v<151) app->chapter_idx=(uint8_t)v; }
     if((p = strstr(buf, "verse=")) != NULL) { int v=atoi(p+6); if(v>=0&&v<=176) app->verse_idx=(uint8_t)v; }
+    if((p = strstr(buf, "trans=")) != NULL) { int v=atoi(p+6); if(v>=0&&v<MAX_TRANSLATIONS) app->translation_idx=(uint8_t)v; }
 }
 
 // Bookmarks persistence
@@ -497,6 +499,61 @@ void suggestion_fill(App* app) {
     app->suggest_sel   = 0;
 }
 
+// Returns the root path for the currently selected translation's content.
+static void translation_data_dir(App* app, char* buf, size_t len) {
+    if(app->translation_count == 0) {
+        snprintf(buf, len, "%s", DATA_DIR);
+    } else {
+        snprintf(buf, len, "%s/%s",
+                 DATA_DIR,
+                 app->translations[app->translation_idx]);
+    }
+}
+
+// Scan DATA_DIR for subdirectories that contain at least one recognised
+// section folder. Each such subdir is treated as a translation.
+// If none are found the app falls back to the old flat layout.
+void translations_scan(App* app) {
+    app->translation_count = 0;
+    app->translation_idx   = 0;
+
+    File* dir = storage_file_alloc(app->storage);
+    if(!storage_dir_open(dir, DATA_DIR)) {
+        storage_file_free(dir);
+        return;
+    }
+
+    FileInfo fi;
+    char     fname[NAME_LEN];
+    while(storage_dir_read(dir, &fi, fname, sizeof(fname))) {
+        if(!file_info_is_dir(&fi)) continue;
+        if(fname[0] == '.') continue;
+
+        // Check whether this sub-directory contains at least one section folder
+        bool is_translation = false;
+        for(uint8_t s = 0; s < 4 && !is_translation; s++) {
+            char probe[200];
+            snprintf(probe, sizeof(probe), "%s/%s/%s",
+                     DATA_DIR, fname, SECTION_ORDER[s]);
+            File* pf = storage_file_alloc(app->storage);
+            if(storage_dir_open(pf, probe)) {
+                is_translation = true;
+                storage_dir_close(pf);
+            }
+            storage_file_free(pf);
+        }
+
+        if(is_translation && app->translation_count < MAX_TRANSLATIONS) {
+            strncpy(app->translations[app->translation_count],
+                    fname, TRANSLATION_NAME_LEN - 1);
+            app->translations[app->translation_count][TRANSLATION_NAME_LEN - 1] = '\0';
+            app->translation_count++;
+        }
+    }
+    storage_dir_close(dir);
+    storage_file_free(dir);
+}
+
 void rebuild_book_list(App* app) {
     uint8_t sec = app->section_idx;
     app->book_count = 0;
@@ -549,8 +606,10 @@ static uint8_t count_verse_files(Storage* storage, const char* path) {
 }
 
 static void build_chapter_path(App* app, char* buf, size_t buf_len) {
+    char tdir[120];
+    translation_data_dir(app, tdir, sizeof(tdir));
     snprintf(buf, buf_len, "%s/%s/%s/%d",
-             DATA_DIR,
+             tdir,
              SECTION_ORDER[app->section_idx],
              current_book_folder(app),
              app->chapter_idx + 1);
@@ -559,9 +618,11 @@ static void build_chapter_path(App* app, char* buf, size_t buf_len) {
 // Data loading
 
 void refresh_chapter_count(App* app) {
+    char tdir[120];
+    translation_data_dir(app, tdir, sizeof(tdir));
     char path[200];
     snprintf(path, sizeof(path), "%s/%s/%s",
-             DATA_DIR,
+             tdir,
              SECTION_ORDER[app->section_idx],
              current_book_folder(app));
     app->chapter_count = count_chapter_dirs(app->storage, path);
@@ -622,10 +683,12 @@ void do_search(App* app) {
 
     if(!app->search_len || app->book_count == 0) return;
 
-    // Get book path: DATA_DIR/section/book/
+    // Get book path: tdir/section/book/
+    char tdir[120];
+    translation_data_dir(app, tdir, sizeof(tdir));
     char book_path[200];
     snprintf(book_path, sizeof(book_path), "%s/%s/%s",
-             DATA_DIR,
+             tdir,
              SECTION_ORDER[app->section_idx],
              current_book_folder(app));
 
@@ -1006,64 +1069,12 @@ static void draw_settings(Canvas* canvas, App* app) {
 
     canvas_set_font(canvas, FontSecondary);
 
-    // Layout: two top-level rows -- Font, Dunkelmodus
-    // If font row is "expanded" we show the font list inline.
-    const uint8_t ITEM_H  = 11;
-    const uint8_t BODY_Y  = HDR_H + 2;
-    const uint8_t VIS     = 4;
+    const uint8_t ITEM_H = 11;
+    const uint8_t BODY_Y = HDR_H + 2;
+    const uint8_t VIS    = 4;
 
-    if(!app->settings_font_open) {
-        // -- Collapsed view: two rows (Font, Dunkelmodus) --
-
-        // Row 0: Font
-        {
-            uint8_t y   = BODY_Y;
-            bool    sel = (app->settings_sel == SettingsRowFont);
-            if(sel) {
-                set_fg(canvas, app);
-                canvas_draw_box(canvas, 0, y, SCREEN_W, ITEM_H);
-                set_bg(canvas, app);
-            } else {
-                set_fg(canvas, app);
-            }
-            canvas_draw_str(canvas, 3, y + 8, "Font");
-            char fval[32];
-            snprintf(fval, sizeof(fval), "[%s]", FONT_LABELS[app->font_choice]);
-            canvas_draw_str_aligned(canvas, SCREEN_W - 2, y + 8,
-                                    AlignRight, AlignBottom, fval);
-            set_fg(canvas, app);
-        }
-
-        // Row 1: Dark mode
-        {
-            uint8_t y   = BODY_Y + ITEM_H;
-            bool    sel = (app->settings_sel == SettingsRowDark);
-            if(sel) {
-                set_fg(canvas, app);
-                canvas_draw_box(canvas, 0, y, SCREEN_W, ITEM_H);
-                set_bg(canvas, app);
-            } else {
-                set_fg(canvas, app);
-            }
-            canvas_draw_str(canvas, 3, y + 8, "Dark Mode");
-            canvas_draw_str_aligned(canvas, SCREEN_W - 2, y + 8,
-                                    AlignRight, AlignBottom,
-                                    app->dark_mode ? "[On]" : "[Off]");
-            set_fg(canvas, app);
-        }
-
-        // Hint row
-        {
-            set_fg(canvas, app);
-            canvas_set_font(canvas, FontSecondary);
-            canvas_draw_str_aligned(canvas, SCREEN_W / 2, SCREEN_H - 2,
-                                    AlignCenter, AlignBottom,
-                                    "OK=Save  Long-OK=Font List");
-        }
-
-    } else {
+    if(app->settings_font_open) {
         // -- Expanded font picker --
-        // Sub-header
         canvas_set_color(canvas, ColorBlack);
         canvas_draw_box(canvas, 0, HDR_H, SCREEN_W, 9);
         canvas_set_color(canvas, ColorWhite);
@@ -1094,7 +1105,111 @@ static void draw_settings(Canvas* canvas, App* app) {
             set_fg(canvas, app);
         }
         draw_scrollbar(canvas, app, scroll, FONT_COUNT, VIS);
+        return;
     }
+
+    if(app->settings_trans_open) {
+        // -- Expanded translation picker --
+        canvas_set_color(canvas, ColorBlack);
+        canvas_draw_box(canvas, 0, HDR_H, SCREEN_W, 9);
+        canvas_set_color(canvas, ColorWhite);
+        canvas_set_font(canvas, FontSecondary);
+        canvas_draw_str_aligned(canvas, SCREEN_W / 2, HDR_H + 8,
+                                AlignCenter, AlignBottom, "Select Trans  OK=Confirm");
+        set_fg(canvas, app);
+
+        uint8_t scroll = (app->settings_trans_sel >= VIS) ?
+                         app->settings_trans_sel - VIS + 1 : 0;
+
+        const uint8_t TY0 = HDR_H + 11;
+        for(uint8_t i = 0; i < VIS && (scroll + i) < app->translation_count; i++) {
+            uint8_t si     = scroll + i;
+            uint8_t y      = TY0 + i * ITEM_H;
+            bool    cursor = (app->settings_trans_sel == si);
+            bool    active = (app->translation_idx == si);
+
+            if(cursor) {
+                set_fg(canvas, app);
+                canvas_draw_box(canvas, 2, y - 1, SCREEN_W - 4, ITEM_H);
+                set_bg(canvas, app);
+            } else {
+                set_fg(canvas, app);
+            }
+            canvas_draw_str(canvas, 5,  y + 8, active ? ">" : " ");
+            canvas_draw_str(canvas, 13, y + 8, app->translations[si]);
+            set_fg(canvas, app);
+        }
+        draw_scrollbar(canvas, app, scroll, app->translation_count, VIS);
+        return;
+    }
+
+    // -- Collapsed view --
+
+    // Row 0: Translation (only when multiple are present)
+    if(app->translation_count > 1) {
+        uint8_t y   = BODY_Y;
+        bool    sel = (app->settings_sel == SettingsRowTranslation);
+        if(sel) {
+            set_fg(canvas, app);
+            canvas_draw_box(canvas, 0, y, SCREEN_W, ITEM_H);
+            set_bg(canvas, app);
+        } else {
+            set_fg(canvas, app);
+        }
+        canvas_draw_str(canvas, 3, y + 8, "Translation");
+        char tval[24];
+        snprintf(tval, sizeof(tval), "[%.16s]",
+                 app->translations[app->translation_idx]);
+        canvas_draw_str_aligned(canvas, SCREEN_W - 2, y + 8,
+                                AlignRight, AlignBottom, tval);
+        set_fg(canvas, app);
+    }
+
+    // Row 1 (or 0 if no translation row): Font
+    {
+        uint8_t row_offset = (app->translation_count > 1) ? 1 : 0;
+        uint8_t y   = BODY_Y + ITEM_H * row_offset;
+        bool    sel = (app->settings_sel == SettingsRowFont);
+        if(sel) {
+            set_fg(canvas, app);
+            canvas_draw_box(canvas, 0, y, SCREEN_W, ITEM_H);
+            set_bg(canvas, app);
+        } else {
+            set_fg(canvas, app);
+        }
+        canvas_draw_str(canvas, 3, y + 8, "Font");
+        char fval[32];
+        snprintf(fval, sizeof(fval), "[%s]", FONT_LABELS[app->font_choice]);
+        canvas_draw_str_aligned(canvas, SCREEN_W - 2, y + 8,
+                                AlignRight, AlignBottom, fval);
+        set_fg(canvas, app);
+    }
+
+    // Row 2 (or 1): Dark mode
+    {
+        uint8_t row_offset = (app->translation_count > 1) ? 2 : 1;
+        uint8_t y   = BODY_Y + ITEM_H * row_offset;
+        bool    sel = (app->settings_sel == SettingsRowDark);
+        if(sel) {
+            set_fg(canvas, app);
+            canvas_draw_box(canvas, 0, y, SCREEN_W, ITEM_H);
+            set_bg(canvas, app);
+        } else {
+            set_fg(canvas, app);
+        }
+        canvas_draw_str(canvas, 3, y + 8, "Dark Mode");
+        canvas_draw_str_aligned(canvas, SCREEN_W - 2, y + 8,
+                                AlignRight, AlignBottom,
+                                app->dark_mode ? "[On]" : "[Off]");
+        set_fg(canvas, app);
+    }
+
+    // Hint row
+    set_fg(canvas, app);
+    canvas_set_font(canvas, FontSecondary);
+    canvas_draw_str_aligned(canvas, SCREEN_W / 2, SCREEN_H - 2,
+                            AlignCenter, AlignBottom,
+                            "OK=Save  Long-OK=List");
 }
 
 // Scene: About
@@ -1108,8 +1223,12 @@ static const char* const ABOUT_LINES[] = {
     "SD card directory setup:",
     "  /ext/apps_data/",
     "   luther1912/",
+    "  <Translation>/",
     "  <Section>/<Book>/",
     "   <Chap>/verseN.txt",
+    "  (1 translation: place",
+    "   sections directly in",
+    "   luther1912/ folder)",
     "---------------------",
     "CONTROLS",
     "- - - - Main Menu - - - -",
@@ -1141,6 +1260,7 @@ static const char* const ABOUT_LINES[] = {
     "   Long-Up = fill hint",
     "   OK = jump to verse",
     "   Back = refine query",
+    "   Long-Back = Main Menu",
     "- - - - About - - - - - -",
     "   Up/Down = scroll",
     "   Back/OK = close",
@@ -1288,9 +1408,12 @@ static void input_cb(InputEvent* ev, void* ctx) {
 static void on_menu(App* app, InputEvent* ev) {
     // Long-press OK -> Settings (quick shortcut still works)
     if(ev->type == InputTypeLong && ev->key == InputKeyOk) {
-        app->settings_sel       = SettingsRowFont;
-        app->settings_font_sel  = (uint8_t)app->font_choice;
-        app->settings_font_open = false;
+        app->settings_sel        = (app->translation_count > 1) ?
+                                   SettingsRowTranslation : SettingsRowFont;
+        app->settings_font_sel   = (uint8_t)app->font_choice;
+        app->settings_font_open  = false;
+        app->settings_trans_open = false;
+        app->settings_long_consumed = false;
         app->view = ViewSettings;
         return;
     }
@@ -1409,6 +1532,7 @@ static void on_menu(App* app, InputEvent* ev) {
             app->suggest_count = 0;
             app->suggest_sel   = 0;
             app->suggest_long_consumed = false;
+            app->kb_back_long_consumed = false;
             app->view = ViewSearch;
             break;
         case RowBookmarks:
@@ -1417,9 +1541,12 @@ static void on_menu(App* app, InputEvent* ev) {
             app->view = ViewBookmarks;
             break;
         case RowSettings:
-            app->settings_sel       = SettingsRowFont;
-            app->settings_font_sel  = (uint8_t)app->font_choice;
-            app->settings_font_open = false;
+            app->settings_sel        = (app->translation_count > 1) ?
+                                       SettingsRowTranslation : SettingsRowFont;
+            app->settings_font_sel   = (uint8_t)app->font_choice;
+            app->settings_font_open  = false;
+            app->settings_trans_open = false;
+            app->settings_long_consumed = false;
             app->view = ViewSettings;
             break;
         case RowAbout:
@@ -1580,8 +1707,9 @@ static void on_reading(App* app, InputEvent* ev) {
 // Input: Settings
 
 static void on_settings(App* app, InputEvent* ev) {
+
+    // -- Font list is open --
     if(app->settings_font_open) {
-        // -- Font list is open --
         if(ev->type != InputTypeShort && ev->type != InputTypeRepeat) return;
         switch(ev->key) {
         case InputKeyUp:
@@ -1593,10 +1721,49 @@ static void on_settings(App* app, InputEvent* ev) {
         case InputKeyOk:
             app->font_choice = (FontChoice)app->settings_font_sel;
             app->settings_font_open = false;
+            app->settings_long_consumed = false;
             if(app->chapter.count > 0) { wrap_chapter(app); app->wrap.scroll = 0; }
             break;
         case InputKeyBack:
             app->settings_font_open = false;
+            app->settings_long_consumed = false;
+            break;
+        default: break;
+        }
+        return;
+    }
+
+    // -- Translation list is open --
+    if(app->settings_trans_open) {
+        if(ev->type != InputTypeShort && ev->type != InputTypeRepeat) return;
+        switch(ev->key) {
+        case InputKeyUp:
+            if(app->settings_trans_sel > 0) app->settings_trans_sel--;
+            break;
+        case InputKeyDown:
+            if(app->settings_trans_sel < app->translation_count - 1)
+                app->settings_trans_sel++;
+            break;
+        case InputKeyOk:
+            if(app->settings_trans_sel != app->translation_idx) {
+                app->translation_idx = app->settings_trans_sel;
+                // Reset position -- content layout may differ between translations
+                app->section_idx = 0;
+                app->book_idx    = 0;
+                app->chapter_idx = 0;
+                app->verse_idx   = 0;
+                rebuild_book_list(app);
+                refresh_chapter_count(app);
+                refresh_verse_count(app);
+                memset(&app->chapter, 0, sizeof(app->chapter));
+                memset(&app->wrap,    0, sizeof(app->wrap));
+            }
+            app->settings_trans_open = false;
+            app->settings_long_consumed = false;
+            break;
+        case InputKeyBack:
+            app->settings_trans_open = false;
+            app->settings_long_consumed = false;
             break;
         default: break;
         }
@@ -1605,15 +1772,35 @@ static void on_settings(App* app, InputEvent* ev) {
 
     // -- Collapsed settings view --
 
-    // Long-press OK on Font row -> open font list
-    if(ev->type == InputTypeLong && ev->key == InputKeyOk &&
-       app->settings_sel == SettingsRowFont) {
-        app->settings_font_sel  = (uint8_t)app->font_choice;
-        app->settings_font_open = true;
+    // Long-press OK opens the relevant list for Font or Translation rows.
+    // Set long_consumed so the following Short/Repeat event is ignored.
+    if(ev->type == InputTypeLong && ev->key == InputKeyOk) {
+        if(app->settings_sel == SettingsRowFont) {
+            app->settings_font_sel  = (uint8_t)app->font_choice;
+            app->settings_font_open = true;
+            app->settings_long_consumed = true;
+            return;
+        }
+        if(app->settings_sel == SettingsRowTranslation && app->translation_count > 1) {
+            app->settings_trans_sel  = app->translation_idx;
+            app->settings_trans_open = true;
+            app->settings_long_consumed = true;
+            return;
+        }
+    }
+
+    // Release clears the consumed flag
+    if(ev->type == InputTypeRelease && ev->key == InputKeyOk) {
+        app->settings_long_consumed = false;
         return;
     }
 
+    // Suppress the Short event that fires immediately after the long-press
+    if(app->settings_long_consumed) return;
+
     if(ev->type != InputTypeShort && ev->type != InputTypeRepeat) return;
+
+    uint8_t row_count = (app->translation_count > 1) ? 3 : 2;
 
     switch(ev->key) {
     case InputKeyUp:
@@ -1621,7 +1808,7 @@ static void on_settings(App* app, InputEvent* ev) {
             app->settings_sel = (SettingsRow)(app->settings_sel - 1);
         break;
     case InputKeyDown:
-        if((uint8_t)app->settings_sel < SettingsRowCount - 1)
+        if((uint8_t)app->settings_sel < row_count - 1)
             app->settings_sel = (SettingsRow)(app->settings_sel + 1);
         break;
     case InputKeyLeft:
@@ -1629,7 +1816,6 @@ static void on_settings(App* app, InputEvent* ev) {
         if(app->settings_sel == SettingsRowDark) {
             app->dark_mode = !app->dark_mode;
         } else if(app->settings_sel == SettingsRowFont) {
-            // Cycle font with left/right
             if(ev->key == InputKeyLeft) {
                 app->settings_font_sel = (app->settings_font_sel > 0) ?
                     app->settings_font_sel - 1 : FONT_COUNT - 1;
@@ -1639,6 +1825,24 @@ static void on_settings(App* app, InputEvent* ev) {
             }
             app->font_choice = (FontChoice)app->settings_font_sel;
             if(app->chapter.count > 0) { wrap_chapter(app); app->wrap.scroll = 0; }
+        } else if(app->settings_sel == SettingsRowTranslation &&
+                  app->translation_count > 1) {
+            if(ev->key == InputKeyLeft) {
+                app->translation_idx = (app->translation_idx > 0) ?
+                    app->translation_idx - 1 : app->translation_count - 1;
+            } else {
+                app->translation_idx = (app->translation_idx < app->translation_count - 1) ?
+                    app->translation_idx + 1 : 0;
+            }
+            app->section_idx = 0;
+            app->book_idx    = 0;
+            app->chapter_idx = 0;
+            app->verse_idx   = 0;
+            rebuild_book_list(app);
+            refresh_chapter_count(app);
+            refresh_verse_count(app);
+            memset(&app->chapter, 0, sizeof(app->chapter));
+            memset(&app->wrap,    0, sizeof(app->wrap));
         }
         break;
     case InputKeyOk:
@@ -1646,7 +1850,6 @@ static void on_settings(App* app, InputEvent* ev) {
         app->view = ViewMenu;
         break;
     case InputKeyBack:
-        // Discard changes to dark mode; font already applied live
         app->view = ViewMenu;
         break;
     default: break;
@@ -1750,8 +1953,16 @@ int32_t luther1912_app(void* p) {
 
     storage_simply_mkdir(app->storage, DATA_DIR);
 
+    // Scan for available translations before loading settings so the
+    // restored translation_idx can be validated against what's actually present
+    translations_scan(app);
+
     // Load saved settings + last position
     settings_load(app);
+
+    // Clamp restored translation_idx in case translations changed on the card
+    if(app->translation_idx >= app->translation_count)
+        app->translation_idx = 0;
 
     // Load bookmarks
     bookmarks_load(app);

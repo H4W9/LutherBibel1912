@@ -49,6 +49,9 @@
 #define KEYWORD_WORD_LEN 32   // max chars per keyword
 #define SUGGEST_MAX       5   // candidates held at once
 
+#define MAX_TRANSLATIONS   5
+#define TRANSLATION_NAME_LEN 32
+
 // ============================================================
 // Enums
 // ============================================================
@@ -85,9 +88,10 @@ typedef enum {
 } FontChoice;
 
 typedef enum {
-    SettingsRowFont  = 0,
-    SettingsRowDark  = 1,
-    SettingsRowCount = 2,
+    SettingsRowTranslation = 0,
+    SettingsRowFont        = 1,
+    SettingsRowDark        = 2,
+    SettingsRowCount       = 3,
 } SettingsRow;
 
 // ============================================================
@@ -138,6 +142,9 @@ typedef struct App {
     SettingsRow settings_sel;
     uint8_t     settings_font_sel;
     bool        settings_font_open;
+    uint8_t     settings_trans_sel;
+    bool        settings_trans_open;
+    bool        settings_long_consumed;  // suppress repeat/short after long-OK opens a list
 
     // About
     uint8_t about_scroll;
@@ -151,6 +158,7 @@ typedef struct App {
     bool    kb_caps;
     bool    kb_long_consumed;  // true while a long-press OK is being held,
                                // suppresses the following repeat/short event
+    bool    kb_back_long_consumed; // same for long-press Back in search
 
     // Keyword suggestions
     uint16_t kw_count;                                // how many loaded
@@ -186,6 +194,11 @@ typedef struct App {
 
     // Navigation history: view to return to when pressing Back from reading
     AppView prev_view;
+
+    // Translations detected on SD card
+    char    translations[MAX_TRANSLATIONS][TRANSLATION_NAME_LEN];
+    uint8_t translation_count;
+    uint8_t translation_idx;   // index into translations[]
 } App;
 
 // ============================================================
@@ -204,3 +217,4 @@ void refresh_verse_count(App* app);
 void keywords_load(App* app);
 void suggestions_update(App* app);
 void suggestion_fill(App* app);
+void translations_scan(App* app);

@@ -204,6 +204,17 @@ void draw_search_results(Canvas* canvas, App* app) {
 
 void on_search(App* app, InputEvent* ev) {
 
+    // Long Back: always exit to menu, even with text in the buffer
+    if(ev->type == InputTypeLong && ev->key == InputKeyBack) {
+        app->view = ViewMenu;
+        app->kb_back_long_consumed = true;
+        return;
+    }
+    if(ev->type == InputTypeRelease && ev->key == InputKeyBack) {
+        app->kb_back_long_consumed = false;
+        return;
+    }
+
     // ── Long Up: fill current suggestion ─────────────────────────────────
     if(ev->type == InputTypeLong && ev->key == InputKeyUp) {
         if(app->suggest_count > 0) {
@@ -345,6 +356,7 @@ void on_search(App* app, InputEvent* ev) {
 
     // ── Back: backspace if buffer non-empty, else exit to menu ────────────
     case InputKeyBack:
+        if(app->kb_back_long_consumed) break;
         if(app->search_len > 0) {
             search_buf_backspace(app);
             suggestions_update(app);
