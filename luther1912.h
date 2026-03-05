@@ -17,7 +17,12 @@
 #define SETTINGS_PATH   DATA_DIR "/settings.txt"
 
 #define BOOKMARKS_PATH  DATA_DIR "/bookmarks.txt"
-#define MAX_BOOKMARKS    50
+#define GROUPS_PATH     DATA_DIR "/bm_groups.txt"
+#define MAX_BOOKMARKS   250
+#define MAX_BM_GROUPS    20
+#define BM_GROUP_NAME_LEN 24
+// Sentinel: bookmark with group == BM_GROUP_NONE belongs to no group ("Default")
+#define BM_GROUP_NONE  0xFF
 
 #define MAX_SECTIONS      4
 #define MAX_BOOKS        80
@@ -65,6 +70,10 @@ typedef enum {
     ViewSearch,
     ViewSearchResults,
     ViewBookmarks,
+    ViewBmGroupPick,      // overlay: pick heading when adding a bookmark
+    ViewBmGroupNew,       // overlay: type a new heading name
+    ViewBmHeadingEdit,    // overlay: edit or delete a heading
+    ViewBmItemEdit,       // overlay: add to heading or delete a bookmark
     ViewLoading,
     ViewError,
 } AppView;
@@ -194,10 +203,39 @@ typedef struct App {
         uint8_t canon_book;  // index into CANON_BOOKS[]
         uint8_t chapter;     // 0-based
         uint8_t verse;       // 1-based
+        uint8_t group;       // index into bm_groups[], or BM_GROUP_NONE
     } bookmarks[MAX_BOOKMARKS];
     uint8_t bm_count;
     uint8_t bm_sel;
     uint8_t bm_scroll;
+
+    // Bookmark groups (headings/subjects)
+    char    bm_groups[MAX_BM_GROUPS][BM_GROUP_NAME_LEN];
+    uint8_t bm_group_count;
+
+    // Bookmark view drill-down state
+    bool    bm_in_group;     // false = top-level (headings), true = inside a group
+    uint8_t bm_open_group;   // which group is open (BM_GROUP_NONE = Default)
+
+    // Group-picker overlay state (ViewBmGroupPick / ViewBmGroupNew)
+    uint8_t bm_pick_sel;     // selected row in the picker list
+    uint8_t bm_pick_scroll;  // scroll offset of the picker list
+    bool    bm_pick_move;    // true when picker is reassigning an existing bookmark
+                             // (bm_item_idx) rather than adding a new one
+    // bm_long_consumed: suppresses the Short event that fires right after a
+    // long-press OK on a heading row in the top-level bookmark list.
+    bool    bm_long_consumed;
+
+    // Heading edit overlay state (ViewBmHeadingEdit)
+    uint8_t bm_edit_group;    // which group is being edited
+    uint8_t bm_edit_sel;      // 0 = Rename, 1 = Delete
+
+    // Bookmark item edit overlay state (ViewBmItemEdit)
+    uint8_t bm_item_idx;      // index into app->bookmarks[] being edited
+    uint8_t bm_item_sel;      // 0 = Add to Heading, 1 = Delete
+    // bm_naming=true tells keyboard.c GO! to confirm a group name instead of searching.
+    bool    bm_naming;       // true while keyboard is being used for group name entry
+    char    bm_new_name[BM_GROUP_NAME_LEN]; // saved when entering the view
 
     // Available sections for the current translation (subset of 0..3)
     uint8_t avail_sections[4];
@@ -232,3 +270,11 @@ void keywords_load(App* app);
 void suggestions_update(App* app);
 void suggestion_fill(App* app);
 void translations_scan(App* app);
+void bm_groups_save(App* app);
+void draw_bm_group_pick(Canvas* canvas, App* app);
+void on_bm_group_pick(App* app, InputEvent* ev);
+void bm_group_name_confirm(App* app);
+void draw_bm_heading_edit(Canvas* canvas, App* app);
+void on_bm_heading_edit(App* app, InputEvent* ev);
+void draw_bm_item_edit(Canvas* canvas, App* app);
+void on_bm_item_edit(App* app, InputEvent* ev);

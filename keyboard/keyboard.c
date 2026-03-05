@@ -120,7 +120,8 @@ static void update_text_scroll(App* app) {
 void draw_search_input(Canvas* canvas, App* app) {
     // ── Header: suggestion dominates, fallback to page title ─────────────────
     static const char* const ptitles[] = { "Search", "Search: Sym", "Search: Uml" };
-    const char* base_title = ptitles[app->kb_page < 3 ? app->kb_page : 0];
+    const char* base_title = app->bm_naming ? "New Heading" :
+                             ptitles[app->kb_page < 3 ? app->kb_page : 0];
     if(app->suggest_count > 0) {
         // Black bar
         canvas_set_color(canvas, ColorBlack);
@@ -315,10 +316,16 @@ void draw_search_results(Canvas* canvas, App* app) {
 
 void on_search(App* app, InputEvent* ev) {
 
-    // Long Back: always exit to menu
+    // Long Back: always exit to menu (or to group picker when naming)
     if(ev->type == InputTypeLong && ev->key == InputKeyBack) {
-        app->view = ViewMenu;
-        app->kb_back_long_consumed = true;
+        if(app->bm_naming) {
+            app->bm_naming = false;
+            app->kb_back_long_consumed = true;
+            app->view = ViewBmGroupPick;
+        } else {
+            app->view = ViewMenu;
+            app->kb_back_long_consumed = true;
+        }
         return;
     }
     if(ev->type == InputTypeRelease && ev->key == InputKeyBack) {
@@ -495,7 +502,9 @@ void on_search(App* app, InputEvent* ev) {
                 app->kb_page = (app->kb_page == 0) ? 1 : (app->kb_page == 1) ? 2 : 0;
                 break;
             case 4: // GO!
-                if(app->search_len > 0) {
+                if(app->bm_naming) {
+                    bm_group_name_confirm(app);
+                } else if(app->search_len > 0) {
                     app->view = ViewLoading;
                     view_port_update(app->view_port);
                     do_search(app);
@@ -512,6 +521,10 @@ void on_search(App* app, InputEvent* ev) {
         if(app->search_len > 0) {
             search_buf_backspace(app);
             suggestions_update(app);
+        } else if(app->bm_naming) {
+            // Cancel naming: clear flag and return to group picker
+            app->bm_naming = false;
+            app->view = ViewBmGroupPick;
         } else {
             app->view = ViewMenu;
         }

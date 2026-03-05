@@ -1,7 +1,7 @@
 // Luther Bibel 1912 Viewer for Flipper Zero
 // SD card: /ext/apps_data/luther1912/<Section>/<Book>/<Chapter>/verseN.txt
 
-#define APP_VERSION "1.3"
+#define APP_VERSION "1.4"
 #define APP_NAME    "FZ Bible"
 
 #include "font/font.h"
@@ -273,12 +273,13 @@ static void bookmarks_save(App* app) {
         return;
     }
     for(uint8_t i = 0; i < app->bm_count; i++) {
-        char line[32];
-        int len = snprintf(line, sizeof(line), "%d %d %d %d\n",
+        char line[40];
+        int len = snprintf(line, sizeof(line), "%d %d %d %d %d\n",
             (int)app->bookmarks[i].sec,
             (int)app->bookmarks[i].canon_book,
             (int)app->bookmarks[i].chapter,
-            (int)app->bookmarks[i].verse);
+            (int)app->bookmarks[i].verse,
+            (int)app->bookmarks[i].group);
         if(len > 0) storage_file_write(f, line, (uint16_t)len);
     }
     storage_file_close(f);
@@ -294,28 +295,80 @@ static void bookmarks_load(App* app) {
         storage_file_free(f);
         return;
     }
-    char buf[512];
-    uint16_t rd = storage_file_read(f, buf, sizeof(buf) - 1);
+    // 250 bookmarks * ~40 bytes each = ~10 KB; read in one shot
+    char* buf = malloc(10240);
+    if(!buf) { storage_file_free(f); return; }
+    uint16_t rd = storage_file_read(f, buf, 10239);
     buf[rd] = '\0';
     storage_file_close(f);
     storage_file_free(f);
 
     char* line = buf;
     while(*line && app->bm_count < MAX_BOOKMARKS) {
-        int sec, cb, ch, vv;
-        if(sscanf(line, "%d %d %d %d", &sec, &cb, &ch, &vv) == 4) {
+        int sec, cb, ch, vv, grp;
+        int fields = sscanf(line, "%d %d %d %d %d", &sec, &cb, &ch, &vv, &grp);
+        if(fields >= 4) {
             if(sec >= 0 && sec < 4 && cb >= 0 && cb < CANON_BOOK_COUNT &&
                ch >= 0 && vv >= 1) {
                 app->bookmarks[app->bm_count].sec        = (uint8_t)sec;
                 app->bookmarks[app->bm_count].canon_book = (uint8_t)cb;
                 app->bookmarks[app->bm_count].chapter    = (uint8_t)ch;
                 app->bookmarks[app->bm_count].verse      = (uint8_t)vv;
+                // group field: old files without it default to BM_GROUP_NONE
+                if(fields >= 5 && grp >= 0 && grp < MAX_BM_GROUPS)
+                    app->bookmarks[app->bm_count].group = (uint8_t)grp;
+                else
+                    app->bookmarks[app->bm_count].group = BM_GROUP_NONE;
                 app->bm_count++;
             }
         }
-        // Advance to next line
         while(*line && *line != '\n') line++;
         if(*line == '\n') line++;
+    }
+    free(buf);
+}
+
+// Groups persistence
+
+void bm_groups_save(App* app) {
+    File* f = storage_file_alloc(app->storage);
+    if(!storage_file_open(f, GROUPS_PATH, FSAM_WRITE, FSOM_CREATE_ALWAYS)) {
+        storage_file_free(f);
+        return;
+    }
+    for(uint8_t i = 0; i < app->bm_group_count; i++) {
+        char line[BM_GROUP_NAME_LEN + 2];
+        int len = snprintf(line, sizeof(line), "%s\n", app->bm_groups[i]);
+        if(len > 0) storage_file_write(f, line, (uint16_t)len);
+    }
+    storage_file_close(f);
+    storage_file_free(f);
+}
+
+static void bm_groups_load(App* app) {
+    app->bm_group_count = 0;
+    File* f = storage_file_alloc(app->storage);
+    if(!storage_file_open(f, GROUPS_PATH, FSAM_READ, FSOM_OPEN_EXISTING)) {
+        storage_file_free(f);
+        return;
+    }
+    char buf[MAX_BM_GROUPS * (BM_GROUP_NAME_LEN + 2)];
+    uint16_t rd = storage_file_read(f, buf, sizeof(buf) - 1);
+    buf[rd] = '\0';
+    storage_file_close(f);
+    storage_file_free(f);
+
+    char* line = buf;
+    while(*line && app->bm_group_count < MAX_BM_GROUPS) {
+        char* end = line;
+        while(*end && *end != '\n') end++;
+        size_t len = (size_t)(end - line);
+        if(len > 0 && len < BM_GROUP_NAME_LEN) {
+            memcpy(app->bm_groups[app->bm_group_count], line, len);
+            app->bm_groups[app->bm_group_count][len] = '\0';
+            app->bm_group_count++;
+        }
+        line = (*end == '\n') ? end + 1 : end;
     }
 }
 
@@ -337,25 +390,41 @@ static bool bookmark_is_set(App* app) {
     return bookmark_find(app) >= 0;
 }
 
+static void bookmark_remove(App* app) {
+    int idx = bookmark_find(app);
+    if(idx < 0) return;
+    for(uint8_t i = (uint8_t)idx; i + 1 < app->bm_count; i++)
+        app->bookmarks[i] = app->bookmarks[i + 1];
+    app->bm_count--;
+    bookmarks_save(app);
+}
+
+// Add bookmark with specified group (BM_GROUP_NONE = Default / no heading)
+static void bookmark_add_with_group(App* app, uint8_t group) {
+    if(app->verse_idx == 0 || app->book_count == 0) return;
+    if(app->bm_count >= MAX_BOOKMARKS) return;
+    uint8_t i = app->bm_count;
+    app->bookmarks[i].sec        = app->section_idx;
+    app->bookmarks[i].canon_book = app->book_list[app->book_idx];
+    app->bookmarks[i].chapter    = app->chapter_idx;
+    app->bookmarks[i].verse      = app->verse_idx;
+    app->bookmarks[i].group      = group;
+    app->bm_count++;
+    bookmarks_save(app);
+}
+
+// Long-OK in reading view: if already bookmarked, remove it.
+// If not bookmarked, open the group-picker overlay.
 static void bookmark_toggle(App* app) {
     if(app->verse_idx == 0 || app->book_count == 0) return;
-    int idx = bookmark_find(app);
-    if(idx >= 0) {
-        // Remove
-        for(uint8_t i = (uint8_t)idx; i + 1 < app->bm_count; i++)
-            app->bookmarks[i] = app->bookmarks[i + 1];
-        app->bm_count--;
+    if(bookmark_find(app) >= 0) {
+        bookmark_remove(app);
     } else {
-        // Add
-        if(app->bm_count >= MAX_BOOKMARKS) return;
-        uint8_t i = app->bm_count;
-        app->bookmarks[i].sec        = app->section_idx;
-        app->bookmarks[i].canon_book = app->book_list[app->book_idx];
-        app->bookmarks[i].chapter    = app->chapter_idx;
-        app->bookmarks[i].verse      = app->verse_idx;
-        app->bm_count++;
+        // Open group picker
+        app->bm_pick_sel    = 0;
+        app->bm_pick_scroll = 0;
+        app->view = ViewBmGroupPick;
     }
-    bookmarks_save(app);
 }
 
 // ============================================================
@@ -1495,6 +1564,10 @@ static const char* const ABOUT_LINES[] = {
     "   Up/Down = move",
     "   OK = jump to verse",
     "   Back = close",
+    "   Hold OK on verse",
+    "   to add/remove",
+    "   Choose heading or",
+    "   Default/Add New",
     "- - - - Search - - - - - ",
     "   Select book first",
     "   OK on Search row",
@@ -1538,70 +1611,629 @@ static void draw_about(Canvas* canvas, App* app) {
 
 // Scene: Bookmarks
 
+// Scene: Bookmarks
+//
+// Top level: lists "Default (N)" and each heading "Name (N)".
+//            Only rows with at least one bookmark are shown.
+// Drill-down: lists the bookmarks inside the selected heading.
+
+// Count bookmarks belonging to a group (BM_GROUP_NONE = Default).
+static uint8_t bm_count_in_group(App* app, uint8_t grp) {
+    uint8_t n = 0;
+    for(uint8_t i = 0; i < app->bm_count; i++)
+        if(app->bookmarks[i].group == grp) n++;
+    return n;
+}
+
+// Top-level row encoding:
+//   0x00..0x1F  = group index (named heading)
+//   BM_GROUP_NONE (0xFF) when used as a "row type" → grouped heading "Default"
+//   0x80..0xFF (but not BM_GROUP_NONE) = bookmark index + 0x80  (ungrouped bm)
+//
+// We encode rows as follows:
+//   rows[i] < 0x80  → named group index
+//   rows[i] == BM_GROUP_NONE → the "Default" group row  (kept for compat)
+//   rows[i] >= 0x80 && rows[i] != BM_GROUP_NONE → (rows[i] & 0x7F) = bm index,
+//                                                   but we use a separate array
+//
+// Simpler: use a struct-free parallel array approach.
+// rows_type[i]: 0 = heading (rows[i] is group idx or BM_GROUP_NONE),
+//               1 = ungrouped bookmark (rows[i] is index into app->bookmarks[])
+#define BM_TOP_MAX (MAX_BM_GROUPS + 1 + MAX_BOOKMARKS)
+typedef struct { uint8_t kind; uint8_t idx; } BmTopRow;
+// kind: 0 = heading group (idx = group index, BM_GROUP_NONE = Default heading)
+//       1 = ungrouped bookmark (idx = index into app->bookmarks[])
+
+static uint8_t bm_build_top_rows(App* app, BmTopRow rows[BM_TOP_MAX]) {
+    uint16_t n = 0;
+    // Named headings first (only those that have bookmarks)
+    for(uint8_t g = 0; g < app->bm_group_count && n < BM_TOP_MAX; g++)
+        if(bm_count_in_group(app, g) > 0) {
+            rows[n].kind = 0; rows[n].idx = g; n++;
+        }
+    // Then ungrouped bookmarks directly (BM_GROUP_NONE)
+    for(uint8_t i = 0; i < app->bm_count && n < BM_TOP_MAX; i++)
+        if(app->bookmarks[i].group == BM_GROUP_NONE) {
+            rows[n].kind = 1; rows[n].idx = i; n++;
+        }
+    return (uint8_t)n;
+}
+
 static void draw_bookmarks(Canvas* canvas, App* app) {
     if(app->dark_mode) {
         canvas_set_color(canvas, ColorBlack);
         canvas_draw_box(canvas, 0, 0, SCREEN_W, SCREEN_H);
     }
 
-    char hdr_buf[24];
-    if(app->bm_count == 0)
-        snprintf(hdr_buf, sizeof(hdr_buf), "Bookmarks");
-    else
-        snprintf(hdr_buf, sizeof(hdr_buf), "Bookmarks (%d)", (int)app->bm_count);
-    draw_hdr(canvas, hdr_buf);
-
-    set_fg(canvas, app);
-    canvas_set_font(canvas, FontSecondary);
-
-    if(app->bm_count == 0) {
-        canvas_draw_str_aligned(canvas, SCREEN_W / 2, 34,
-                                AlignCenter, AlignCenter, "No bookmarks");
-        canvas_draw_str_aligned(canvas, SCREEN_W / 2, 46,
-                                AlignCenter, AlignCenter, "Hold OK on a verse");
-        return;
-    }
-
     const uint8_t LINE_H = 10;
     const uint8_t vis    = (uint8_t)((SCREEN_H - HDR_H - 2) / LINE_H);
 
-    // Clamp scroll
-    if(app->bm_sel < app->bm_scroll)
-        app->bm_scroll = app->bm_sel;
-    if(app->bm_sel >= app->bm_scroll + vis)
-        app->bm_scroll = (uint8_t)(app->bm_sel - vis + 1);
+    if(!app->bm_in_group) {
+        // ── Top level: headings + ungrouped bookmarks ────────────────────────
+        char hdr_buf[24];
+        snprintf(hdr_buf, sizeof(hdr_buf), "Bookmarks (%d)", (int)app->bm_count);
+        draw_hdr(canvas, hdr_buf);
 
-    for(uint8_t i = 0; i < vis && (app->bm_scroll + i) < app->bm_count; i++) {
-        uint8_t si = app->bm_scroll + i;
-        uint8_t y  = HDR_H + 2 + i * LINE_H;
-        bool    sel = (si == app->bm_sel);
+        set_fg(canvas, app);
+        canvas_set_font(canvas, FontSecondary);
 
-        if(sel) {
-            set_fg(canvas, app);
-            canvas_draw_box(canvas, 0, y - 1, SCREEN_W - SB_W - 2, LINE_H);
-            set_bg(canvas, app);
-        } else {
+        if(app->bm_count == 0) {
+            canvas_draw_str_aligned(canvas, SCREEN_W / 2, 34,
+                                    AlignCenter, AlignCenter, "No bookmarks");
+            canvas_draw_str_aligned(canvas, SCREEN_W / 2, 46,
+                                    AlignCenter, AlignCenter, "Hold OK on a verse");
+            return;
+        }
+
+        BmTopRow rows[BM_TOP_MAX];
+        uint8_t row_count = bm_build_top_rows(app, rows);
+
+        if(row_count == 0) return;
+        if(app->bm_sel >= row_count) app->bm_sel = row_count - 1;
+
+        if(app->bm_sel < app->bm_scroll) app->bm_scroll = app->bm_sel;
+        if(app->bm_sel >= app->bm_scroll + vis)
+            app->bm_scroll = (uint8_t)(app->bm_sel - vis + 1);
+
+        for(uint8_t i = 0; i < vis && (app->bm_scroll + i) < row_count; i++) {
+            uint8_t ri  = app->bm_scroll + i;
+            uint8_t y   = HDR_H + 2 + i * LINE_H;
+            bool    sel = (ri == app->bm_sel);
+
+            if(sel) {
+                set_fg(canvas, app);
+                canvas_draw_box(canvas, 0, y - 1, SCREEN_W - SB_W - 2, LINE_H);
+                set_bg(canvas, app);
+            } else {
+                set_fg(canvas, app);
+            }
+
+            if(rows[ri].kind == 0) {
+                // Heading row
+                char label[BM_GROUP_NAME_LEN + 8];
+                uint8_t cnt = bm_count_in_group(app, rows[ri].idx);
+                snprintf(label, sizeof(label), "%s (%d)",
+                         app->bm_groups[rows[ri].idx], (int)cnt);
+                set_ui_font(canvas, label);
+                canvas_draw_str(canvas, 4, y + 8, label);
+                canvas_set_font(canvas, FontSecondary);
+                canvas_draw_str_aligned(canvas, SCREEN_W - SB_W - 4, y + 8,
+                                        AlignRight, AlignBottom, ">");
+            } else {
+                // Ungrouped bookmark row
+                uint8_t bi = rows[ri].idx;
+                char blabel[14];
+                canon_book_label(app, app->bookmarks[bi].canon_book,
+                                 blabel, sizeof(blabel));
+                char ref[32];
+                snprintf(ref, sizeof(ref), "%s %d:%d",
+                         blabel,
+                         (int)(app->bookmarks[bi].chapter + 1),
+                         (int)app->bookmarks[bi].verse);
+                set_ui_font(canvas, ref);
+                canvas_draw_str(canvas, 4, y + 8, ref);
+            }
             set_fg(canvas, app);
         }
 
-        // Build reference label: "BookName ch:v"
-        char blabel[14];
-        canon_book_label(app, app->bookmarks[si].canon_book, blabel, sizeof(blabel));
-        char ref[32];
-        snprintf(ref, sizeof(ref), "%s %d:%d",
-                 blabel,
-                 (int)(app->bookmarks[si].chapter + 1),
-                 (int)app->bookmarks[si].verse);
-        set_ui_font(canvas, ref);
-        canvas_draw_str(canvas, 4, y + 8, ref);
-        canvas_set_font(canvas, FontSecondary);  // restore for next iteration
-        set_fg(canvas, app);
-    }
+        draw_scrollbar(canvas, app, app->bm_scroll, row_count, vis);
 
-    draw_scrollbar(canvas, app, app->bm_scroll, app->bm_count, vis);
+    } else {
+        // ── Drill-down: bookmarks inside one heading ─────────────────────────
+        char hdr_buf[32];
+        uint8_t grp = app->bm_open_group;
+        uint8_t cnt = bm_count_in_group(app, grp);
+        snprintf(hdr_buf, sizeof(hdr_buf), "%s (%d)", app->bm_groups[grp], (int)cnt);
+        draw_hdr(canvas, hdr_buf);
+
+        set_fg(canvas, app);
+        canvas_set_font(canvas, FontSecondary);
+
+        uint8_t idx[MAX_BOOKMARKS];
+        uint8_t idx_count = 0;
+        for(uint8_t i = 0; i < app->bm_count; i++)
+            if(app->bookmarks[i].group == grp && idx_count < MAX_BOOKMARKS)
+                idx[idx_count++] = i;
+
+        if(idx_count == 0) {
+            canvas_draw_str_aligned(canvas, SCREEN_W / 2, 38,
+                                    AlignCenter, AlignCenter, "(empty)");
+            return;
+        }
+
+        if(app->bm_sel >= idx_count) app->bm_sel = idx_count - 1;
+
+        if(app->bm_sel < app->bm_scroll) app->bm_scroll = app->bm_sel;
+        if(app->bm_sel >= app->bm_scroll + vis)
+            app->bm_scroll = (uint8_t)(app->bm_sel - vis + 1);
+
+        for(uint8_t i = 0; i < vis && (app->bm_scroll + i) < idx_count; i++) {
+            uint8_t ri = app->bm_scroll + i;
+            uint8_t bi = idx[ri];
+            uint8_t y  = HDR_H + 2 + i * LINE_H;
+            bool    sel = (ri == app->bm_sel);
+
+            if(sel) {
+                set_fg(canvas, app);
+                canvas_draw_box(canvas, 0, y - 1, SCREEN_W - SB_W - 2, LINE_H);
+                set_bg(canvas, app);
+            } else {
+                set_fg(canvas, app);
+            }
+
+            char blabel[14];
+            canon_book_label(app, app->bookmarks[bi].canon_book, blabel, sizeof(blabel));
+            char ref[32];
+            snprintf(ref, sizeof(ref), "%s %d:%d",
+                     blabel,
+                     (int)(app->bookmarks[bi].chapter + 1),
+                     (int)app->bookmarks[bi].verse);
+            set_ui_font(canvas, ref);
+            canvas_draw_str(canvas, 4, y + 8, ref);
+            canvas_set_font(canvas, FontSecondary);
+            set_fg(canvas, app);
+        }
+
+        draw_scrollbar(canvas, app, app->bm_scroll, idx_count, vis);
+    }
 }
 
 
+
+// ============================================================
+// Scene: Bookmark group picker overlay (ViewBmGroupPick)
+// List rows: "Default", <existing groups>, "Add New"
+// ============================================================
+
+// Total rows in picker = 1 (Default) + bm_group_count + 1 (Add New)
+static uint8_t bm_pick_row_count(App* app) {
+    return (uint8_t)(2 + app->bm_group_count);
+}
+
+void draw_bm_group_pick(Canvas* canvas, App* app) {
+    // Draw a centered modal box
+    const uint8_t BOX_X  = 4;
+    const uint8_t BOX_Y  = 4;
+    const uint8_t BOX_W  = SCREEN_W - 8;
+    const uint8_t BOX_H  = SCREEN_H - 8;
+    const uint8_t ITEM_H = 10;
+    const uint8_t HDR_HT = 12;
+    const uint8_t BODY_Y = BOX_Y + HDR_HT;
+    const uint8_t VIS    = (uint8_t)((BOX_H - HDR_HT) / ITEM_H);
+
+    // Shadow / background
+    canvas_set_color(canvas, ColorBlack);
+    canvas_draw_box(canvas, BOX_X + 2, BOX_Y + 2, BOX_W, BOX_H);
+    canvas_set_color(canvas, ColorWhite);
+    canvas_draw_box(canvas, BOX_X, BOX_Y, BOX_W, BOX_H);
+    canvas_set_color(canvas, ColorBlack);
+    canvas_draw_frame(canvas, BOX_X, BOX_Y, BOX_W, BOX_H);
+
+    // Header
+    canvas_draw_box(canvas, BOX_X, BOX_Y, BOX_W, HDR_HT);
+    canvas_set_color(canvas, ColorWhite);
+    canvas_set_font(canvas, FontSecondary);
+    canvas_draw_str_aligned(canvas, SCREEN_W / 2, BOX_Y + 1,
+                            AlignCenter, AlignTop, "Save under:");
+    canvas_set_color(canvas, ColorBlack);
+
+    // Clamp scroll
+    uint8_t total = bm_pick_row_count(app);
+    if(app->bm_pick_sel < app->bm_pick_scroll)
+        app->bm_pick_scroll = app->bm_pick_sel;
+    if(app->bm_pick_sel >= app->bm_pick_scroll + VIS)
+        app->bm_pick_scroll = (uint8_t)(app->bm_pick_sel - VIS + 1);
+
+    canvas_set_font(canvas, FontSecondary);
+    for(uint8_t vi = 0; vi < VIS; vi++) {
+        uint8_t ri = app->bm_pick_scroll + vi;
+        if(ri >= total) break;
+        uint8_t y  = BODY_Y + vi * ITEM_H;
+        bool    sel = (ri == app->bm_pick_sel);
+
+        if(sel) {
+            canvas_set_color(canvas, ColorBlack);
+            canvas_draw_box(canvas, BOX_X + 1, y, BOX_W - 2, ITEM_H);
+            canvas_set_color(canvas, ColorWhite);
+        } else {
+            canvas_set_color(canvas, ColorBlack);
+        }
+
+        const char* label;
+        char lbuf[BM_GROUP_NAME_LEN + 2];
+        if(ri == 0) {
+            label = "Default";
+        } else if(ri <= app->bm_group_count) {
+            snprintf(lbuf, sizeof(lbuf), "%s", app->bm_groups[ri - 1]);
+            label = lbuf;
+        } else {
+            label = "+ Add New";
+        }
+        canvas_draw_str(canvas, BOX_X + 4, y + 8, label);
+    }
+    // Mini scrollbar inside box
+    if(total > VIS) {
+        uint8_t track_h = (uint8_t)(BOX_H - HDR_HT - 2);
+        uint8_t bar_h   = (uint8_t)((uint32_t)track_h * VIS / total);
+        if(bar_h < 2) bar_h = 2;
+        uint8_t bar_y = (uint8_t)(BODY_Y + 1 +
+            (uint32_t)(track_h - bar_h) * app->bm_pick_scroll / (total - VIS));
+        canvas_set_color(canvas, ColorBlack);
+        canvas_draw_box(canvas, BOX_X + BOX_W - 3, bar_y, 2, bar_h);
+    }
+}
+
+void on_bm_group_pick(App* app, InputEvent* ev) {
+    if(ev->type != InputTypeShort && ev->type != InputTypeRepeat) return;
+    uint8_t total = bm_pick_row_count(app);
+    switch(ev->key) {
+    case InputKeyUp:
+        if(app->bm_pick_sel > 0) app->bm_pick_sel--;
+        else app->bm_pick_sel = total - 1;
+        break;
+    case InputKeyDown:
+        if(app->bm_pick_sel < total - 1) app->bm_pick_sel++;
+        else app->bm_pick_sel = 0;
+        break;
+    case InputKeyOk: {
+        uint8_t ri = app->bm_pick_sel;
+        uint8_t target_group;
+        if(ri == 0) {
+            target_group = BM_GROUP_NONE;
+        } else if(ri <= app->bm_group_count) {
+            target_group = (uint8_t)(ri - 1);
+        } else {
+            // "Add New" -- open keyboard in naming mode
+            memset(app->search_buf, 0, sizeof(app->search_buf));
+            app->search_len  = 0;
+            app->cursor_pos  = 0;
+            app->text_scroll = 0;
+            app->cursor_blink = 0;
+            app->kb_row  = 0;
+            app->kb_col  = 0;
+            app->kb_page = 0;
+            app->kb_caps = false;
+            app->kb_long_consumed      = false;
+            app->kb_back_long_consumed = false;
+            app->suggest_count = 0;
+            app->suggest_sel   = 0;
+            app->suggest_long_consumed = false;
+            app->bm_naming = true;
+            // Signal "create new" to bm_group_name_confirm
+            app->bm_edit_group = app->bm_group_count;
+            app->view = ViewBmGroupNew;
+            break;
+        }
+
+        if(app->bm_pick_move) {
+            // Reassign existing bookmark to the chosen group
+            app->bookmarks[app->bm_item_idx].group = target_group;
+            bookmarks_save(app);
+            app->bm_pick_move = false;
+            // Return to bookmark list top level
+            app->bm_in_group = false;
+            app->bm_sel      = 0;
+            app->bm_scroll   = 0;
+            app->view = ViewBookmarks;
+        } else {
+            // Original behaviour: add a new bookmark under the chosen group
+            bookmark_add_with_group(app, target_group);
+            app->view = ViewReading;
+        }
+        break;
+    }
+    case InputKeyBack:
+        // Cancel: return to reading without bookmarking (or bookmarks if moving)
+        if(app->bm_pick_move) {
+            app->bm_pick_move = false;
+            app->view = ViewBookmarks;
+        } else {
+            app->view = ViewReading;
+        }
+        break;
+    default: break;
+    }
+}
+
+// ============================================================
+// Called by keyboard.c GO! when bm_naming == true.
+// Saves the typed name as a new group, adds the bookmark, returns to reading.
+// ============================================================
+void bm_group_name_confirm(App* app) {
+    if(app->search_len > 0) {
+        uint8_t len = app->search_len;
+        if(len >= BM_GROUP_NAME_LEN) len = BM_GROUP_NAME_LEN - 1;
+
+        if(app->bm_edit_group < app->bm_group_count) {
+            // Rename existing group
+            memcpy(app->bm_groups[app->bm_edit_group], app->search_buf, len);
+            app->bm_groups[app->bm_edit_group][len] = '\0';
+            bm_groups_save(app);
+            // Restore search state
+            memset(app->search_buf, 0, sizeof(app->search_buf));
+            app->search_len   = 0;
+            app->cursor_pos   = 0;
+            app->text_scroll  = 0;
+            app->suggest_count = 0;
+            app->suggest_sel   = 0;
+            app->bm_naming = false;
+            app->bm_in_group = false;
+            app->bm_sel    = 0;
+            app->bm_scroll = 0;
+            app->view = ViewBookmarks;
+            return;
+        } else if(app->bm_group_count < MAX_BM_GROUPS) {
+            // Create new group and add the pending bookmark
+            memcpy(app->bm_groups[app->bm_group_count], app->search_buf, len);
+            app->bm_groups[app->bm_group_count][len] = '\0';
+            uint8_t new_grp = app->bm_group_count;
+            app->bm_group_count++;
+            bm_groups_save(app);
+            bookmark_add_with_group(app, new_grp);
+        }
+    }
+    // Restore search state
+    memset(app->search_buf, 0, sizeof(app->search_buf));
+    app->search_len   = 0;
+    app->cursor_pos   = 0;
+    app->text_scroll  = 0;
+    app->suggest_count = 0;
+    app->suggest_sel   = 0;
+    app->bm_naming = false;
+    app->view = ViewReading;
+}
+
+
+// ============================================================
+// Scene: Heading edit overlay (ViewBmHeadingEdit)
+// Two options: Rename  /  Delete
+// ============================================================
+
+void draw_bm_heading_edit(Canvas* canvas, App* app) {
+    const uint8_t BOX_X  = 14;
+    const uint8_t BOX_Y  = 12;
+    const uint8_t BOX_W  = SCREEN_W - 28;
+    const uint8_t BOX_H  = 44;
+    const uint8_t HDR_HT = 12;
+    const uint8_t ITEM_H = 12;
+    const uint8_t BODY_Y = BOX_Y + HDR_HT + 2;
+
+    // Shadow
+    canvas_set_color(canvas, ColorBlack);
+    canvas_draw_box(canvas, BOX_X + 2, BOX_Y + 2, BOX_W, BOX_H);
+    canvas_set_color(canvas, ColorWhite);
+    canvas_draw_box(canvas, BOX_X, BOX_Y, BOX_W, BOX_H);
+    canvas_set_color(canvas, ColorBlack);
+    canvas_draw_frame(canvas, BOX_X, BOX_Y, BOX_W, BOX_H);
+
+    // Header: group name (truncated)
+    canvas_draw_box(canvas, BOX_X, BOX_Y, BOX_W, HDR_HT);
+    canvas_set_color(canvas, ColorWhite);
+    canvas_set_font(canvas, FontSecondary);
+    char hdr[BM_GROUP_NAME_LEN + 2];
+    snprintf(hdr, sizeof(hdr), "%s", app->bm_groups[app->bm_edit_group]);
+    // Truncate to box width
+    hdr[16] = '\0';
+    canvas_draw_str_aligned(canvas, SCREEN_W / 2, BOX_Y + 1,
+                            AlignCenter, AlignTop, hdr);
+    canvas_set_color(canvas, ColorBlack);
+
+    // Two option rows: Rename, Delete
+    const char* opts[2] = { "Rename", "Delete" };
+    for(uint8_t i = 0; i < 2; i++) {
+        uint8_t y   = BODY_Y + i * ITEM_H;
+        bool    sel = (app->bm_edit_sel == i);
+        if(sel) {
+            canvas_set_color(canvas, ColorBlack);
+            canvas_draw_box(canvas, BOX_X + 2, y, BOX_W - 4, ITEM_H);
+            canvas_set_color(canvas, ColorWhite);
+        } else {
+            canvas_set_color(canvas, ColorBlack);
+        }
+        canvas_draw_str_aligned(canvas, SCREEN_W / 2, y + 9,
+                                AlignCenter, AlignBottom, opts[i]);
+    }
+}
+
+void on_bm_heading_edit(App* app, InputEvent* ev) {
+    // Suppress the Short that follows the Long which opened this overlay
+    if(ev->type == InputTypeRelease && ev->key == InputKeyOk) {
+        app->bm_long_consumed = false;
+        return;
+    }
+    if(app->bm_long_consumed) return;
+
+    if(ev->type != InputTypeShort && ev->type != InputTypeRepeat) return;
+
+    switch(ev->key) {
+    case InputKeyUp:
+    case InputKeyDown:
+        app->bm_edit_sel ^= 1;  // toggle between 0 and 1
+        break;
+    case InputKeyOk:
+        if(app->bm_edit_sel == 0) {
+            // Rename: open keyboard in naming mode
+            // Save which group we're renaming in bm_edit_group (already set)
+            memset(app->search_buf, 0, sizeof(app->search_buf));
+            // Pre-fill with current name
+            strncpy(app->search_buf, app->bm_groups[app->bm_edit_group],
+                    MAX_SEARCH_LEN);
+            app->search_len = (uint8_t)strlen(app->search_buf);
+            app->cursor_pos  = app->search_len;
+            app->text_scroll = 0;
+            app->cursor_blink = 0;
+            app->kb_row  = 0;
+            app->kb_col  = 0;
+            app->kb_page = 0;
+            app->kb_caps = false;
+            app->kb_long_consumed      = false;
+            app->kb_back_long_consumed = false;
+            app->suggest_count = 0;
+            app->suggest_sel   = 0;
+            app->suggest_long_consumed = false;
+            // Use bm_naming=true; bm_group_name_confirm checks bm_edit_group
+            // to know it should rename rather than create.
+            // We set a separate flag via bm_edit_group != BM_GROUP_NONE already.
+            app->bm_naming = true;
+            app->view = ViewBmGroupNew;
+        } else {
+            // Delete: remove all bookmarks in this group, then remove group entry
+            uint8_t g = app->bm_edit_group;
+            // Remove all bookmarks belonging to this group
+            uint8_t w = 0;
+            for(uint8_t i = 0; i < app->bm_count; i++) {
+                if(app->bookmarks[i].group != g) {
+                    // Re-number group indices above g
+                    if(app->bookmarks[i].group != BM_GROUP_NONE &&
+                       app->bookmarks[i].group > g)
+                        app->bookmarks[i].group--;
+                    app->bookmarks[w++] = app->bookmarks[i];
+                }
+            }
+            app->bm_count = w;
+            // Remove group from bm_groups[]
+            for(uint8_t i = g; i + 1 < app->bm_group_count; i++)
+                memcpy(app->bm_groups[i], app->bm_groups[i + 1],
+                       BM_GROUP_NAME_LEN);
+            app->bm_group_count--;
+            bm_groups_save(app);
+            bookmarks_save(app);
+            // Return to top-level bookmark list
+            app->bm_in_group = false;
+            app->bm_sel      = 0;
+            app->bm_scroll   = 0;
+            app->view = ViewBookmarks;
+        }
+        break;
+    case InputKeyBack:
+        // Cancel – return to bookmarks top level
+        app->bm_in_group = false;
+        app->bm_sel      = 0;
+        app->bm_scroll   = 0;
+        app->view = ViewBookmarks;
+        break;
+    default: break;
+    }
+}
+
+// ============================================================
+// Scene: Bookmark item edit overlay (ViewBmItemEdit)
+// Two options: Add to Heading  /  Delete
+// ============================================================
+
+void draw_bm_item_edit(Canvas* canvas, App* app) {
+    const uint8_t BOX_X  = 10;
+    const uint8_t BOX_Y  = 12;
+    const uint8_t BOX_W  = SCREEN_W - 20;
+    const uint8_t BOX_H  = 44;
+    const uint8_t HDR_HT = 12;
+    const uint8_t ITEM_H = 12;
+    const uint8_t BODY_Y = BOX_Y + HDR_HT + 2;
+
+    // Shadow
+    canvas_set_color(canvas, ColorBlack);
+    canvas_draw_box(canvas, BOX_X + 2, BOX_Y + 2, BOX_W, BOX_H);
+    canvas_set_color(canvas, ColorWhite);
+    canvas_draw_box(canvas, BOX_X, BOX_Y, BOX_W, BOX_H);
+    canvas_set_color(canvas, ColorBlack);
+    canvas_draw_frame(canvas, BOX_X, BOX_Y, BOX_W, BOX_H);
+
+    // Header: bookmark reference
+    canvas_draw_box(canvas, BOX_X, BOX_Y, BOX_W, HDR_HT);
+    canvas_set_color(canvas, ColorWhite);
+    canvas_set_font(canvas, FontSecondary);
+    uint8_t bi = app->bm_item_idx;
+    char blabel[14];
+    canon_book_label(app, app->bookmarks[bi].canon_book, blabel, sizeof(blabel));
+    char ref[28];
+    snprintf(ref, sizeof(ref), "%s %d:%d",
+             blabel,
+             (int)(app->bookmarks[bi].chapter + 1),
+             (int)app->bookmarks[bi].verse);
+    canvas_draw_str_aligned(canvas, SCREEN_W / 2, BOX_Y + 1,
+                            AlignCenter, AlignTop, ref);
+    canvas_set_color(canvas, ColorBlack);
+
+    // Two option rows
+    const char* opts[2] = { "Add to Heading", "Delete" };
+    for(uint8_t i = 0; i < 2; i++) {
+        uint8_t y   = BODY_Y + i * ITEM_H;
+        bool    sel = (app->bm_item_sel == i);
+        if(sel) {
+            canvas_set_color(canvas, ColorBlack);
+            canvas_draw_box(canvas, BOX_X + 2, y, BOX_W - 4, ITEM_H);
+            canvas_set_color(canvas, ColorWhite);
+        } else {
+            canvas_set_color(canvas, ColorBlack);
+        }
+        canvas_draw_str_aligned(canvas, SCREEN_W / 2, y + 9,
+                                AlignCenter, AlignBottom, opts[i]);
+    }
+}
+
+void on_bm_item_edit(App* app, InputEvent* ev) {
+    // Suppress the Short that fires right after the long-press that opened us
+    if(ev->type == InputTypeRelease && ev->key == InputKeyOk) {
+        app->bm_long_consumed = false;
+        return;
+    }
+    if(app->bm_long_consumed) return;
+
+    if(ev->type != InputTypeShort && ev->type != InputTypeRepeat) return;
+
+    switch(ev->key) {
+    case InputKeyUp:
+    case InputKeyDown:
+        app->bm_item_sel ^= 1;
+        break;
+    case InputKeyOk:
+        if(app->bm_item_sel == 0) {
+            // Add to Heading: open the group picker in "move" mode
+            app->bm_pick_sel    = 0;
+            app->bm_pick_scroll = 0;
+            app->bm_pick_move   = true;
+            app->view = ViewBmGroupPick;
+        } else {
+            // Delete this bookmark
+            uint8_t bi = app->bm_item_idx;
+            for(uint8_t i = bi; i + 1 < app->bm_count; i++)
+                app->bookmarks[i] = app->bookmarks[i + 1];
+            app->bm_count--;
+            bookmarks_save(app);
+            // Return to whichever level we came from (in-group or top)
+            app->bm_sel    = 0;
+            app->bm_scroll = 0;
+            if(app->bm_in_group && bm_count_in_group(app, app->bm_open_group) == 0)
+                app->bm_in_group = false;
+            app->view = ViewBookmarks;
+        }
+        break;
+    case InputKeyBack:
+        app->view = ViewBookmarks;
+        break;
+    default: break;
+    }
+}
 
 static void draw_loading(Canvas* canvas, App* app) {
     if(app->dark_mode) {
@@ -1634,6 +2266,10 @@ static void draw_cb(Canvas* canvas, void* ctx) {
     case ViewSettings: draw_settings(canvas, app); break;
     case ViewAbout:    draw_about(canvas, app);    break;
     case ViewBookmarks:     draw_bookmarks(canvas, app);     break;
+    case ViewBmGroupPick:   draw_bm_group_pick(canvas, app); break;
+    case ViewBmGroupNew:    draw_search_input(canvas, app);  break;  // real keyboard
+    case ViewBmHeadingEdit: draw_bm_heading_edit(canvas, app); break;
+    case ViewBmItemEdit:    draw_bm_item_edit(canvas, app);   break;
     case ViewSearch:        draw_search_input(canvas, app);   break;
     case ViewSearchResults: draw_search_results(canvas, app); break;
     case ViewLoading:  draw_loading(canvas, app);  break;
@@ -1809,8 +2445,9 @@ static void on_menu(App* app, InputEvent* ev) {
             app->view = ViewSearch;
             break;
         case RowBookmarks:
-            app->bm_sel    = 0;
-            app->bm_scroll = 0;
+            app->bm_sel      = 0;
+            app->bm_scroll   = 0;
+            app->bm_in_group = false;
             app->view = ViewBookmarks;
             break;
         case RowSettings:
@@ -2156,29 +2793,142 @@ static void on_about(App* app, InputEvent* ev) {
 // Input: Bookmarks
 
 static void on_bookmarks(App* app, InputEvent* ev) {
-    if(ev->type != InputTypeShort && ev->type != InputTypeRepeat) return;
-
     const uint8_t LINE_H = 10;
     const uint8_t vis    = (uint8_t)((SCREEN_H - HDR_H - 2) / LINE_H);
 
-    switch(ev->key) {
-    case InputKeyUp:
-        if(app->bm_sel > 0) app->bm_sel--;
-        else app->bm_sel = app->bm_count - 1;  // wrap to bottom
-        break;
-    case InputKeyDown:
-        if(app->bm_sel < app->bm_count - 1) app->bm_sel++;
-        else app->bm_sel = 0;  // wrap to top
-        break;
-    case InputKeyOk:
-        if(app->bm_count == 0) break;
-        {
-            uint8_t bi = app->bm_sel;
+    if(!app->bm_in_group) {
+        // ── Top level ────────────────────────────────────────────────────────
+
+        BmTopRow rows[BM_TOP_MAX];
+        uint8_t row_count = bm_build_top_rows(app, rows);
+        if(row_count == 0) { app->view = ViewMenu; return; }
+        if(app->bm_sel >= row_count) app->bm_sel = row_count - 1;
+
+        // Long-press OK on a heading row → open heading edit overlay
+        // Long-press OK on an ungrouped bookmark → open bookmark item edit overlay
+        if(ev->type == InputTypeLong && ev->key == InputKeyOk) {
+            if(app->bm_sel < row_count) {
+                if(rows[app->bm_sel].kind == 0) {
+                    app->bm_edit_group    = rows[app->bm_sel].idx;
+                    app->bm_edit_sel      = 0;
+                    app->bm_long_consumed = true;
+                    app->view = ViewBmHeadingEdit;
+                } else {
+                    app->bm_item_idx      = rows[app->bm_sel].idx;
+                    app->bm_item_sel      = 0;
+                    app->bm_long_consumed = true;
+                    app->view = ViewBmItemEdit;
+                }
+            }
+            return;
+        }
+        // Release clears the consumed flag
+        if(ev->type == InputTypeRelease && ev->key == InputKeyOk) {
+            app->bm_long_consumed = false;
+            return;
+        }
+        // Suppress Short/Repeat that fires right after the long press
+        if(app->bm_long_consumed) return;
+
+        if(ev->type != InputTypeShort && ev->type != InputTypeRepeat) return;
+
+        switch(ev->key) {
+        case InputKeyUp:
+            if(app->bm_sel > 0) app->bm_sel--;
+            else app->bm_sel = row_count - 1;
+            break;
+        case InputKeyDown:
+            if(app->bm_sel < row_count - 1) app->bm_sel++;
+            else app->bm_sel = 0;
+            break;
+        case InputKeyOk: {
+            if(app->bm_sel >= row_count) break;
+            if(rows[app->bm_sel].kind == 0) {
+                // Heading → drill into it
+                app->bm_open_group = rows[app->bm_sel].idx;
+                app->bm_in_group   = true;
+                app->bm_sel        = 0;
+                app->bm_scroll     = 0;
+            } else {
+                // Ungrouped bookmark → jump to reading
+                uint8_t bi = rows[app->bm_sel].idx;
+                uint8_t cb = app->bookmarks[bi].canon_book;
+                app->section_idx = app->bookmarks[bi].sec;
+                rebuild_book_list(app);
+                app->book_idx = 0;
+                for(uint8_t k = 0; k < app->book_count; k++) {
+                    if(app->book_list[k] == cb) { app->book_idx = k; break; }
+                }
+                app->chapter_idx = app->bookmarks[bi].chapter;
+                app->verse_idx   = app->bookmarks[bi].verse;
+                refresh_chapter_count(app);
+                refresh_verse_count(app);
+                app->prev_view = ViewBookmarks;
+                open_reading(app);
+            }
+            break;
+        }
+        case InputKeyBack:
+            app->view = ViewMenu;
+            break;
+        default: break;
+        }
+
+        // Clamp scroll
+        if(app->bm_sel < app->bm_scroll) app->bm_scroll = app->bm_sel;
+        if(app->bm_sel >= app->bm_scroll + vis)
+            app->bm_scroll = (uint8_t)(app->bm_sel - vis + 1);
+
+    } else {
+        // ── Drill-down: bookmarks inside a heading ───────────────────────────
+
+        uint8_t idx[MAX_BOOKMARKS];
+        uint8_t idx_count = 0;
+        for(uint8_t i = 0; i < app->bm_count; i++)
+            if(app->bookmarks[i].group == app->bm_open_group &&
+               idx_count < MAX_BOOKMARKS)
+                idx[idx_count++] = i;
+
+        if(idx_count == 0) {
+            app->bm_in_group = false;
+            app->bm_sel = 0;
+            app->bm_scroll = 0;
+            return;
+        }
+
+        // Long-press OK on a bookmark → item edit overlay
+        if(ev->type == InputTypeLong && ev->key == InputKeyOk) {
+            if(app->bm_sel < idx_count) {
+                app->bm_item_idx      = idx[app->bm_sel];
+                app->bm_item_sel      = 0;
+                app->bm_long_consumed = true;
+                app->view = ViewBmItemEdit;
+            }
+            return;
+        }
+        if(ev->type == InputTypeRelease && ev->key == InputKeyOk) {
+            app->bm_long_consumed = false;
+            return;
+        }
+        if(app->bm_long_consumed) return;
+
+        if(ev->type != InputTypeShort && ev->type != InputTypeRepeat) return;
+
+        switch(ev->key) {
+        case InputKeyUp:
+            if(app->bm_sel > 0) app->bm_sel--;
+            else app->bm_sel = idx_count - 1;
+            break;
+        case InputKeyDown:
+            if(app->bm_sel < idx_count - 1) app->bm_sel++;
+            else app->bm_sel = 0;
+            break;
+        case InputKeyOk: {
+            if(app->bm_sel >= idx_count) break;
+            uint8_t bi = idx[app->bm_sel];
             uint8_t cb = app->bookmarks[bi].canon_book;
-            // Find which section this book belongs to
             app->section_idx = app->bookmarks[bi].sec;
             rebuild_book_list(app);
-            // Find book_idx for canon_book in book_list
             app->book_idx = 0;
             for(uint8_t k = 0; k < app->book_count; k++) {
                 if(app->book_list[k] == cb) { app->book_idx = k; break; }
@@ -2189,18 +2939,17 @@ static void on_bookmarks(App* app, InputEvent* ev) {
             refresh_verse_count(app);
             app->prev_view = ViewBookmarks;
             open_reading(app);
+            break;
         }
-        break;
-    case InputKeyBack:
-        app->view = ViewMenu;
-        break;
-    default: break;
-    }
+        case InputKeyBack:
+            app->bm_in_group = false;
+            app->bm_sel      = 0;
+            app->bm_scroll   = 0;
+            break;
+        default: break;
+        }
 
-    // Keep scroll in sync
-    if(app->bm_count > 0) {
-        if(app->bm_sel < app->bm_scroll)
-            app->bm_scroll = app->bm_sel;
+        if(app->bm_sel < app->bm_scroll) app->bm_scroll = app->bm_sel;
         if(app->bm_sel >= app->bm_scroll + vis)
             app->bm_scroll = (uint8_t)(app->bm_sel - vis + 1);
     }
@@ -2246,6 +2995,9 @@ int32_t luther1912_app(void* p) {
     // Load bookmarks
     bookmarks_load(app);
 
+    // Load bookmark groups (headings)
+    bm_groups_load(app);
+
     // Build available section list for the active translation, then book list.
     // This must happen before keywords_load so section_lang_en is set correctly,
     // allowing the right built-in keyword list (German vs English) to be chosen.
@@ -2272,8 +3024,12 @@ int32_t luther1912_app(void* p) {
         case ViewReading:  on_reading(app, &ev);  break;
         case ViewSettings: on_settings(app, &ev); break;
         case ViewSearch:        on_search(app, &ev);         break;
+        case ViewBmGroupNew:    on_search(app, &ev);         break;  // real keyboard
         case ViewSearchResults: on_search_results(app, &ev); break;
-        case ViewBookmarks:     on_bookmarks(app, &ev);      break;
+        case ViewBookmarks:     on_bookmarks(app, &ev);       break;
+        case ViewBmGroupPick:   on_bm_group_pick(app, &ev);   break;
+        case ViewBmHeadingEdit: on_bm_heading_edit(app, &ev); break;
+        case ViewBmItemEdit:    on_bm_item_edit(app, &ev);    break;
         case ViewAbout:    on_about(app, &ev);    break;
         case ViewError:
             if(ev.type == InputTypeShort && ev.key == InputKeyBack)
