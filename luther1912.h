@@ -74,6 +74,7 @@ typedef enum {
     ViewBmGroupNew,       // overlay: type a new heading name
     ViewBmHeadingEdit,    // overlay: edit or delete a heading
     ViewBmItemEdit,       // overlay: add to heading or delete a bookmark
+    ViewBmRangePick,      // overlay: choose end verse for a range bookmark
     ViewLoading,
     ViewError,
 } AppView;
@@ -202,7 +203,8 @@ typedef struct App {
         uint8_t sec;
         uint8_t canon_book;  // index into CANON_BOOKS[]
         uint8_t chapter;     // 0-based
-        uint8_t verse;       // 1-based
+        uint8_t verse;       // 1-based (range start)
+        uint8_t end_verse;   // 1-based (range end); 0 = single verse
         uint8_t group;       // index into bm_groups[], or BM_GROUP_NONE
     } bookmarks[MAX_BOOKMARKS];
     uint8_t bm_count;
@@ -235,6 +237,19 @@ typedef struct App {
     // Bookmark item edit overlay state (ViewBmItemEdit)
     uint8_t bm_item_idx;      // index into app->bookmarks[] being edited
     uint8_t bm_item_sel;      // 0 = Add to Heading, 1 = Delete
+    // Range picker overlay state (ViewBmRangePick)
+    uint8_t bm_range_end;     // tentative end verse
+    uint8_t bm_range_start;   // tentative start verse (set from verse_idx or All-mode pick)
+    uint8_t bm_range_cursor;  // 0=From row active, 1=To row active
+    bool    bm_range_edit_mode; // true when editing existing bookmark (vs creating new)
+
+    // Range reading view state
+    bool    bm_range_view;       // reading is displaying a multi-verse range bookmark
+    uint8_t bm_range_view_end;   // last verse of the range being displayed
+
+    // bm_item_from_reading: ViewBmItemEdit was opened from reading (long-OK on
+    // an already-bookmarked verse), not from the bookmarks list.
+    bool    bm_item_from_reading;
     // bm_naming=true tells keyboard.c GO! to confirm a group name instead of searching.
     bool    bm_naming;       // true while keyboard is being used for group name entry
     char    bm_new_name[BM_GROUP_NAME_LEN]; // saved when entering the view
@@ -280,3 +295,5 @@ void draw_bm_heading_edit(Canvas* canvas, App* app);
 void on_bm_heading_edit(App* app, InputEvent* ev);
 void draw_bm_item_edit(Canvas* canvas, App* app);
 void on_bm_item_edit(App* app, InputEvent* ev);
+void draw_bm_range_pick(Canvas* canvas, App* app);
+void on_bm_range_pick(App* app, InputEvent* ev);

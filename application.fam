@@ -8,7 +8,7 @@ App(
     fap_icon="bible_icon.png",
     fap_icon_assets="icons",
     fap_author="@H4W9",
-    fap_version="1.4",
+    fap_version="1.5",
     fap_description="FZ Bibel App - Bible study app for Flipper Zero",
     sources=["luther1912.c", "keyboard/keyboard.c", "font/font.c"],
 )

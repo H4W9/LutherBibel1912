@@ -1,7 +1,7 @@
 // Luther Bibel 1912 Viewer for Flipper Zero
 // SD card: /ext/apps_data/luther1912/<Section>/<Book>/<Chapter>/verseN.txt
 
-#define APP_VERSION "1.4"
+#define APP_VERSION "1.5"
 #define APP_NAME    "FZ Bible"
 
 #include "font/font.h"
@@ -273,13 +273,14 @@ static void bookmarks_save(App* app) {
         return;
     }
     for(uint8_t i = 0; i < app->bm_count; i++) {
-        char line[40];
-        int len = snprintf(line, sizeof(line), "%d %d %d %d %d\n",
+        char line[48];
+        int len = snprintf(line, sizeof(line), "%d %d %d %d %d %d\n",
             (int)app->bookmarks[i].sec,
             (int)app->bookmarks[i].canon_book,
             (int)app->bookmarks[i].chapter,
             (int)app->bookmarks[i].verse,
-            (int)app->bookmarks[i].group);
+            (int)app->bookmarks[i].group,
+            (int)app->bookmarks[i].end_verse);
         if(len > 0) storage_file_write(f, line, (uint16_t)len);
     }
     storage_file_close(f);
@@ -305,8 +306,8 @@ static void bookmarks_load(App* app) {
 
     char* line = buf;
     while(*line && app->bm_count < MAX_BOOKMARKS) {
-        int sec, cb, ch, vv, grp;
-        int fields = sscanf(line, "%d %d %d %d %d", &sec, &cb, &ch, &vv, &grp);
+        int sec, cb, ch, vv, grp, ev;
+        int fields = sscanf(line, "%d %d %d %d %d %d", &sec, &cb, &ch, &vv, &grp, &ev);
         if(fields >= 4) {
             if(sec >= 0 && sec < 4 && cb >= 0 && cb < CANON_BOOK_COUNT &&
                ch >= 0 && vv >= 1) {
@@ -319,6 +320,11 @@ static void bookmarks_load(App* app) {
                     app->bookmarks[app->bm_count].group = (uint8_t)grp;
                 else
                     app->bookmarks[app->bm_count].group = BM_GROUP_NONE;
+                // end_verse field: old files default to 0 (single verse)
+                if(fields >= 6 && ev > (int)vv && ev <= 176)
+                    app->bookmarks[app->bm_count].end_verse = (uint8_t)ev;
+                else
+                    app->bookmarks[app->bm_count].end_verse = 0;
                 app->bm_count++;
             }
         }
@@ -372,16 +378,18 @@ static void bm_groups_load(App* app) {
     }
 }
 
-// Returns the index of the current single verse in bookmarks[], or -1 if absent
+// Returns the index of any bookmark whose verse range covers the current
+// verse_idx, or -1 if none.  Used for the star indicator and for removal.
 static int bookmark_find(App* app) {
     if(app->verse_idx == 0 || app->book_count == 0) return -1;
     uint8_t cb = app->book_list[app->book_idx];
     for(int i = 0; i < (int)app->bm_count; i++) {
-        if(app->bookmarks[i].sec        == app->section_idx &&
-           app->bookmarks[i].canon_book == cb &&
-           app->bookmarks[i].chapter    == app->chapter_idx &&
-           app->bookmarks[i].verse      == app->verse_idx)
-            return i;
+        if(app->bookmarks[i].sec        != app->section_idx) continue;
+        if(app->bookmarks[i].canon_book != cb)               continue;
+        if(app->bookmarks[i].chapter    != app->chapter_idx) continue;
+        uint8_t v_start = app->bookmarks[i].verse;
+        uint8_t v_end   = app->bookmarks[i].end_verse ? app->bookmarks[i].end_verse : v_start;
+        if(app->verse_idx >= v_start && app->verse_idx <= v_end) return i;
     }
     return -1;
 }
@@ -390,40 +398,47 @@ static bool bookmark_is_set(App* app) {
     return bookmark_find(app) >= 0;
 }
 
-static void bookmark_remove(App* app) {
-    int idx = bookmark_find(app);
-    if(idx < 0) return;
-    for(uint8_t i = (uint8_t)idx; i + 1 < app->bm_count; i++)
-        app->bookmarks[i] = app->bookmarks[i + 1];
-    app->bm_count--;
-    bookmarks_save(app);
-}
 
-// Add bookmark with specified group (BM_GROUP_NONE = Default / no heading)
+// Add bookmark with specified group (BM_GROUP_NONE = Default / no heading).
+// bm_range_start holds the start verse (set before entering the picker in both
+// single-verse and All mode).  bm_range_end holds the end verse.
 static void bookmark_add_with_group(App* app, uint8_t group) {
-    if(app->verse_idx == 0 || app->book_count == 0) return;
+    if(app->book_count == 0) return;
+    uint8_t start_v = app->bm_range_start;
+    if(start_v == 0) return;
     if(app->bm_count >= MAX_BOOKMARKS) return;
     uint8_t i = app->bm_count;
     app->bookmarks[i].sec        = app->section_idx;
     app->bookmarks[i].canon_book = app->book_list[app->book_idx];
     app->bookmarks[i].chapter    = app->chapter_idx;
-    app->bookmarks[i].verse      = app->verse_idx;
+    app->bookmarks[i].verse      = start_v;
+    app->bookmarks[i].end_verse  = (app->bm_range_end > start_v) ? app->bm_range_end : 0;
     app->bookmarks[i].group      = group;
     app->bm_count++;
     bookmarks_save(app);
 }
 
-// Long-OK in reading view: if already bookmarked, remove it.
-// If not bookmarked, open the group-picker overlay.
+// Long-OK in reading view (single-verse mode).
+// If the verse is already covered by a bookmark, open the edit overlay so the
+// user can edit the range, move the heading, or delete it.
+// If there is no bookmark, open the range picker to add one.
 static void bookmark_toggle(App* app) {
     if(app->verse_idx == 0 || app->book_count == 0) return;
-    if(bookmark_find(app) >= 0) {
-        bookmark_remove(app);
+    int existing = bookmark_find(app);
+    if(existing >= 0) {
+        // Already bookmarked — open the item-edit overlay (from-reading mode)
+        app->bm_item_idx          = (uint8_t)existing;
+        app->bm_item_sel          = 0;
+        app->bm_item_from_reading = true;
+        app->bm_long_consumed     = true;   // suppress Short-OK that follows Long
+        app->view = ViewBmItemEdit;
     } else {
-        // Open group picker
-        app->bm_pick_sel    = 0;
-        app->bm_pick_scroll = 0;
-        app->view = ViewBmGroupPick;
+        // Not yet bookmarked — open range picker (single-verse: From is fixed)
+        app->bm_range_start     = app->verse_idx;
+        app->bm_range_end       = app->verse_idx;
+        app->bm_range_cursor    = 1;        // To row is the active/adjustable one
+        app->bm_range_edit_mode = false;
+        app->view = ViewBmRangePick;
     }
 }
 
@@ -951,6 +966,23 @@ static void current_book_label(App* app, char* buf, size_t len) {
     canon_book_label(app, canon_idx, buf, len);
 }
 
+// Format a bookmark's reference string: "Book Ch:V" or "Book Ch:V1-V2" for ranges.
+// buf must be at least 36 bytes.
+static void bm_ref_str(App* app, uint8_t bi, char* buf, size_t bufsz) {
+    char blabel[20];
+    canon_book_label(app, app->bookmarks[bi].canon_book, blabel, sizeof(blabel));
+    uint8_t v_start = app->bookmarks[bi].verse;
+    uint8_t v_end   = app->bookmarks[bi].end_verse;
+    if(v_end > v_start)
+        snprintf(buf, bufsz, "%s %d:%d-%d",
+                 blabel, (int)(app->bookmarks[bi].chapter + 1),
+                 (int)v_start, (int)v_end);
+    else
+        snprintf(buf, bufsz, "%s %d:%d",
+                 blabel, (int)(app->bookmarks[bi].chapter + 1),
+                 (int)v_start);
+}
+
 // Directory helpers
 
 static uint8_t count_chapter_dirs(Storage* storage, const char* path) {
@@ -1130,9 +1162,20 @@ static void load_verse_page(App* app, uint8_t start) {
     }
 }
 
-// Wrapper: initial load (All mode starts at verse 1, single mode ignores paging)
+// Wrapper: initial load (All mode starts at verse 1, single mode ignores paging,
+// range-view mode loads exactly the bookmarked range)
 static void load_chapter(App* app) {
-    if(app->verse_idx == 0) {
+    if(app->bm_range_view) {
+        // Load exactly the range bookmark verses (capped at verse_count)
+        memset(&app->chapter, 0, sizeof(app->chapter));
+        app->verse_page_start = app->verse_idx;     // verse_idx = range start
+        uint8_t end = app->bm_range_view_end;
+        if(end > app->verse_count) end = app->verse_count;
+        for(uint8_t v = app->verse_idx; v <= end && app->chapter.count < MAX_VERSES; v++) {
+            read_verse_file(app, v, app->chapter.text[app->chapter.count], VERSE_BUF_LEN);
+            app->chapter.count++;
+        }
+    } else if(app->verse_idx == 0) {
         load_verse_page(app, 1);
     } else {
         memset(&app->chapter, 0, sizeof(app->chapter));
@@ -1152,7 +1195,9 @@ static void wrap_chapter(App* app) {
 
     for(uint16_t v = 0; v < app->chapter.count && line < WRAP_MAX_LINES; v++) {
         char full[VERSE_BUF_LEN + 10];
-        if(app->verse_idx == 0) {
+        // Range-view and All mode both show verse numbers; single-verse does not.
+        bool show_num = (app->verse_idx == 0 || app->bm_range_view);
+        if(show_num) {
             snprintf(full, sizeof(full), "%d: %s",
                      (int)(app->verse_page_start + v),
                      app->chapter.text[v]);
@@ -1177,26 +1222,26 @@ static void wrap_chapter(App* app) {
             // Clamp copy to fit in the line buffer, but advance pos by
             // exactly `take` so no characters are silently dropped.
             if(first_line_of_verse) {
-                if(app->verse_idx != 0) {
+                if(!show_num) {
                     // Single-verse view: indent first line with one space
                     app->wrap.lines[line][0] = ' ';
                     size_t copy = (take < 37u) ? take : 37u;
                     memcpy(app->wrap.lines[line] + 1, full + pos, copy);
                     app->wrap.lines[line][1 + copy] = '\0';
                 } else {
+                    // All / range view: no leading indent on first line (verse number is prefix)
                     size_t copy = (take < 38u) ? take : 38u;
                     memcpy(app->wrap.lines[line], full + pos, copy);
                     app->wrap.lines[line][copy] = '\0';
                 }
             } else {
-                if (app->verse_idx != 0) {
+                if(!show_num) {
                     // Single-verse view: no indent on continuation lines
                     size_t copy = (take < 38u) ? take : 38u;
                     memcpy(app->wrap.lines[line], full + pos, copy);
                     app->wrap.lines[line][copy] = '\0';
-                }
-                else {
-                    // All mode: indent continuation lines under verse number
+                } else {
+                    // All / range view: indent continuation lines under verse number
                     app->wrap.lines[line][0] = ' ';
                     size_t copy = (take < 37u) ? take : 37u;
                     memcpy(app->wrap.lines[line] + 1, full + pos, copy);
@@ -1390,7 +1435,13 @@ static void draw_reading(Canvas* canvas, App* app) {
     if(app->verse_idx == 0)
         snprintf(hdr, sizeof(hdr), "%s %d",
                  book_label, (int)(app->chapter_idx + 1));
-    else {
+    else if(app->bm_range_view) {
+        // Range view: show "Book Ch:V1-V2" and always show the star
+        snprintf(hdr, sizeof(hdr), "%s %d:%d-%d",
+                 book_label, (int)(app->chapter_idx + 1),
+                 (int)app->verse_idx, (int)app->bm_range_view_end);
+        bm_star = true;
+    } else {
         bm_star = bookmark_is_set(app);
         snprintf(hdr, sizeof(hdr), "%s %d:%d",
                  book_label, (int)(app->chapter_idx + 1), (int)app->verse_idx);
@@ -1622,6 +1673,8 @@ static const char* const ABOUT_LINES[] = {
     "   Left = previous",
     "   Right = next",
     "   Long-OK = bookmark",
+    "   Long-OK on bm=edit",
+    "   L/R in picker=range",
     "   Back = back to menu",
     "- - - - Settings - - - - ",
     "   Up/Down = move row",
@@ -1800,14 +1853,8 @@ static void draw_bookmarks(Canvas* canvas, App* app) {
             } else {
                 // Ungrouped bookmark row
                 uint8_t bi = rows[ri].idx;
-                char blabel[14];
-                canon_book_label(app, app->bookmarks[bi].canon_book,
-                                 blabel, sizeof(blabel));
-                char ref[32];
-                snprintf(ref, sizeof(ref), "%s %d:%d",
-                         blabel,
-                         (int)(app->bookmarks[bi].chapter + 1),
-                         (int)app->bookmarks[bi].verse);
+                char ref[36];
+                bm_ref_str(app, bi, ref, sizeof(ref));
                 set_ui_font(canvas, ref);
                 canvas_draw_str(canvas, 4, y + 8, ref);
             }
@@ -1873,13 +1920,8 @@ static void draw_bookmarks(Canvas* canvas, App* app) {
                 set_fg(canvas, app);
             }
 
-            char blabel[14];
-            canon_book_label(app, app->bookmarks[bi].canon_book, blabel, sizeof(blabel));
-            char ref[32];
-            snprintf(ref, sizeof(ref), "%s %d:%d",
-                     blabel,
-                     (int)(app->bookmarks[bi].chapter + 1),
-                     (int)app->bookmarks[bi].verse);
+            char ref[36];
+            bm_ref_str(app, bi, ref, sizeof(ref));
             set_ui_font(canvas, ref);
             canvas_draw_str(canvas, 4, y + 8, ref);
             canvas_set_font(canvas, FontSecondary);
@@ -1905,9 +1947,9 @@ static uint8_t bm_pick_row_count(App* app) {
 void draw_bm_group_pick(Canvas* canvas, App* app) {
     // Draw a centered modal box
     const uint8_t BOX_X  = 4;
-    const uint8_t BOX_Y  = 4;
     const uint8_t BOX_W  = SCREEN_W - 8;
-    const uint8_t BOX_H  = SCREEN_H - 8;
+    const uint8_t BOX_H  = SCREEN_H - 10;  // leaves 2px above + 2px shadow below
+    const uint8_t BOX_Y  = (SCREEN_H - (BOX_H + 2)) / 2;  // vertically centred; +2 for shadow
     const uint8_t ITEM_H = 10;
     const uint8_t HDR_HT = 12;
     const uint8_t BODY_Y = BOX_Y + HDR_HT;
@@ -2040,23 +2082,50 @@ void on_bm_group_pick(App* app, InputEvent* ev) {
             app->bookmarks[app->bm_item_idx].group = target_group;
             bookmarks_save(app);
             app->bm_pick_move = false;
-            // Return to bookmark list top level
-            app->bm_in_group = false;
-            app->bm_sel      = 0;
-            app->bm_scroll   = 0;
-            app->view = ViewBookmarks;
+            if(app->bm_item_from_reading) {
+                // Came from reading view — go back there
+                app->bm_item_from_reading = false;
+                app->view = ViewReading;
+            } else {
+                // Came from bookmarks list — return to it
+                app->bm_in_group = false;
+                app->bm_sel      = 0;
+                app->bm_scroll   = 0;
+                app->view = ViewBookmarks;
+            }
         } else {
-            // Original behaviour: add a new bookmark under the chosen group
+            // Add a new bookmark
             bookmark_add_with_group(app, target_group);
-            app->view = ViewReading;
+            // Jump to range view if the new bookmark covers multiple verses
+            uint8_t ni = (uint8_t)(app->bm_count - 1);
+            if(app->bookmarks[ni].end_verse > app->bookmarks[ni].verse) {
+                // Always jump to range view so the user sees what they saved
+                app->verse_idx         = app->bookmarks[ni].verse;
+                app->bm_range_view     = true;
+                app->bm_range_view_end = app->bookmarks[ni].end_verse;
+                refresh_verse_count(app);
+                open_reading(app);
+            } else if(app->verse_idx == 0) {
+                // All mode + single-verse bookmark: jump to that verse
+                app->verse_idx     = app->bookmarks[ni].verse;
+                app->bm_range_view = false;
+                refresh_verse_count(app);
+                open_reading(app);
+            } else {
+                app->view = ViewReading;
+            }
         }
         break;
     }
     case InputKeyBack:
-        // Cancel: return to reading without bookmarking (or bookmarks if moving)
         if(app->bm_pick_move) {
             app->bm_pick_move = false;
-            app->view = ViewBookmarks;
+            if(app->bm_item_from_reading) {
+                app->bm_item_from_reading = false;
+                app->view = ViewReading;
+            } else {
+                app->view = ViewBookmarks;
+            }
         } else {
             app->view = ViewReading;
         }
@@ -2110,6 +2179,19 @@ void bm_group_name_confirm(App* app) {
     app->suggest_count = 0;
     app->suggest_sel   = 0;
     app->bm_naming = false;
+
+    // If the just-added bookmark covers a range, open range view
+    if(app->bm_count > 0) {
+        uint8_t ni = (uint8_t)(app->bm_count - 1);
+        if(app->bookmarks[ni].end_verse > app->bookmarks[ni].verse) {
+            app->verse_idx         = app->bookmarks[ni].verse;
+            app->bm_range_view     = true;
+            app->bm_range_view_end = app->bookmarks[ni].end_verse;
+            refresh_verse_count(app);
+            open_reading(app);
+            return;
+        }
+    }
     app->view = ViewReading;
 }
 
@@ -2121,9 +2203,9 @@ void bm_group_name_confirm(App* app) {
 
 void draw_bm_heading_edit(Canvas* canvas, App* app) {
     const uint8_t BOX_X  = 14;
-    const uint8_t BOX_Y  = 12;
     const uint8_t BOX_W  = SCREEN_W - 28;
     const uint8_t BOX_H  = 44;
+    const uint8_t BOX_Y  = (SCREEN_H - (BOX_H + 2)) / 2;  // vertically centred; +2 for shadow
     const uint8_t HDR_HT = 12;
     const uint8_t ITEM_H = 12;
     const uint8_t BODY_Y = BOX_Y + HDR_HT + 2;
@@ -2262,11 +2344,13 @@ void on_bm_heading_edit(App* app, InputEvent* ev) {
 
 void draw_bm_item_edit(Canvas* canvas, App* app) {
     const uint8_t BOX_X  = 10;
-    const uint8_t BOX_Y  = 12;
     const uint8_t BOX_W  = SCREEN_W - 20;
-    const uint8_t BOX_H  = 44;
     const uint8_t HDR_HT = 12;
     const uint8_t ITEM_H = 12;
+
+    uint8_t opt_count = app->bm_item_from_reading ? 3 : 2;
+    const uint8_t BOX_H  = HDR_HT + 2 + opt_count * ITEM_H + 2;
+    const uint8_t BOX_Y  = (SCREEN_H - BOX_H) / 2;   // vertically centred
     const uint8_t BODY_Y = BOX_Y + HDR_HT + 2;
 
     // Shadow
@@ -2277,25 +2361,22 @@ void draw_bm_item_edit(Canvas* canvas, App* app) {
     canvas_set_color(canvas, ColorBlack);
     canvas_draw_frame(canvas, BOX_X, BOX_Y, BOX_W, BOX_H);
 
-    // Header: bookmark reference
+    // Header: bookmark reference (single or range)
     canvas_draw_box(canvas, BOX_X, BOX_Y, BOX_W, HDR_HT);
     canvas_set_color(canvas, ColorWhite);
-    canvas_set_font(canvas, FontSecondary);
     uint8_t bi = app->bm_item_idx;
-    char blabel[14];
-    canon_book_label(app, app->bookmarks[bi].canon_book, blabel, sizeof(blabel));
-    char ref[28];
-    snprintf(ref, sizeof(ref), "%s %d:%d",
-             blabel,
-             (int)(app->bookmarks[bi].chapter + 1),
-             (int)app->bookmarks[bi].verse);
+    char ref[36];
+    bm_ref_str(app, bi, ref, sizeof(ref));
+    set_ui_font(canvas, ref);
     canvas_draw_str_aligned(canvas, SCREEN_W / 2, BOX_Y + 1,
                             AlignCenter, AlignTop, ref);
     canvas_set_color(canvas, ColorBlack);
 
-    // Two option rows
-    const char* opts[2] = { "Add to Heading", "Delete" };
-    for(uint8_t i = 0; i < 2; i++) {
+    // Option rows
+    const char* opts_reading[3] = { "Edit Range", "Move Heading", "Delete" };
+    const char* opts_list[2]    = { "Add to Heading", "Delete" };
+
+    for(uint8_t i = 0; i < opt_count; i++) {
         uint8_t y   = BODY_Y + i * ITEM_H;
         bool    sel = (app->bm_item_sel == i);
         if(sel) {
@@ -2305,8 +2386,10 @@ void draw_bm_item_edit(Canvas* canvas, App* app) {
         } else {
             canvas_set_color(canvas, ColorBlack);
         }
+        canvas_set_font(canvas, FontSecondary);
+        const char* label = app->bm_item_from_reading ? opts_reading[i] : opts_list[i];
         canvas_draw_str_aligned(canvas, SCREEN_W / 2, y + 9,
-                                AlignCenter, AlignBottom, opts[i]);
+                                AlignCenter, AlignBottom, label);
     }
 }
 
@@ -2320,36 +2403,296 @@ void on_bm_item_edit(App* app, InputEvent* ev) {
 
     if(ev->type != InputTypeShort && ev->type != InputTypeRepeat) return;
 
+    uint8_t opt_count = app->bm_item_from_reading ? 3 : 2;
+
     switch(ev->key) {
     case InputKeyUp:
+        app->bm_item_sel = (app->bm_item_sel > 0) ?
+                           app->bm_item_sel - 1 : (uint8_t)(opt_count - 1);
+        break;
     case InputKeyDown:
-        app->bm_item_sel ^= 1;
+        app->bm_item_sel = (app->bm_item_sel < opt_count - 1) ?
+                           app->bm_item_sel + 1 : 0;
         break;
     case InputKeyOk:
-        if(app->bm_item_sel == 0) {
-            // Add to Heading: open the group picker in "move" mode
-            app->bm_pick_sel    = 0;
-            app->bm_pick_scroll = 0;
-            app->bm_pick_move   = true;
-            app->view = ViewBmGroupPick;
-        } else {
-            // Delete this bookmark
+        if(app->bm_item_from_reading) {
+            // ── Opened from reading view ──────────────────────────────────────
             uint8_t bi = app->bm_item_idx;
-            for(uint8_t i = bi; i + 1 < app->bm_count; i++)
-                app->bookmarks[i] = app->bookmarks[i + 1];
-            app->bm_count--;
-            bookmarks_save(app);
-            // Return to whichever level we came from (in-group or top)
-            app->bm_sel    = 0;
-            app->bm_scroll = 0;
-            if(app->bm_in_group && bm_count_in_group(app, app->bm_open_group) == 0)
-                app->bm_in_group = false;
-            app->view = ViewBookmarks;
+            switch(app->bm_item_sel) {
+            case 0:  // Edit Range
+                app->bm_range_start     = app->bookmarks[bi].verse;
+                app->bm_range_end       = app->bookmarks[bi].end_verse ?
+                                          app->bookmarks[bi].end_verse :
+                                          app->bookmarks[bi].verse;
+                // In edit mode both rows are always interactive (cursor starts on From)
+                app->bm_range_cursor    = 0;
+                app->bm_range_edit_mode = true;
+                app->view = ViewBmRangePick;
+                break;
+            case 1:  // Move Heading
+                app->bm_pick_sel    = 0;
+                app->bm_pick_scroll = 0;
+                app->bm_pick_move   = true;
+                app->view = ViewBmGroupPick;
+                break;
+            case 2:  // Delete
+                for(uint8_t i = bi; i + 1 < app->bm_count; i++)
+                    app->bookmarks[i] = app->bookmarks[i + 1];
+                app->bm_count--;
+                bookmarks_save(app);
+                app->bm_range_view        = false;
+                app->bm_item_from_reading = false;
+                app->view = ViewReading;
+                break;
+            }
+        } else {
+            // ── Opened from bookmarks list ────────────────────────────────────
+            uint8_t bi = app->bm_item_idx;
+            if(app->bm_item_sel == 0) {
+                // Add to Heading: open the group picker in "move" mode
+                app->bm_pick_sel    = 0;
+                app->bm_pick_scroll = 0;
+                app->bm_pick_move   = true;
+                app->view = ViewBmGroupPick;
+            } else {
+                // Delete this bookmark
+                for(uint8_t i = bi; i + 1 < app->bm_count; i++)
+                    app->bookmarks[i] = app->bookmarks[i + 1];
+                app->bm_count--;
+                bookmarks_save(app);
+                // Return to whichever level we came from (in-group or top)
+                app->bm_sel    = 0;
+                app->bm_scroll = 0;
+                if(app->bm_in_group && bm_count_in_group(app, app->bm_open_group) == 0)
+                    app->bm_in_group = false;
+                app->view = ViewBookmarks;
+            }
         }
         break;
     case InputKeyBack:
-        app->view = ViewBookmarks;
+        if(app->bm_item_from_reading) {
+            app->bm_item_from_reading = false;
+            app->view = ViewReading;
+        } else {
+            app->view = ViewBookmarks;
+        }
         break;
+    default: break;
+    }
+}
+
+// ============================================================
+// Scene: Range bookmark picker overlay (ViewBmRangePick)
+//
+// Single-verse mode (verse_idx != 0):
+//   From row is fixed display; cursor stays on To row (adjustable).
+//   Left/Right adjust the To verse.
+//
+// All mode (verse_idx == 0) or Edit mode:
+//   Both From and To rows are adjustable.
+//   Up/Down switch the active row; Left/Right adjust it.
+//   Range is limited to 25 verses.
+//
+// OK → group picker (new) or saves directly (edit mode).
+// Back → cancel, return to reading.
+// ============================================================
+
+#define BM_RANGE_MAX 25   // maximum verses in a range bookmark
+
+void draw_bm_range_pick(Canvas* canvas, App* app) {
+    const uint8_t BOX_X    = 2;
+    const uint8_t BOX_W    = SCREEN_W - 4;  // 124px
+    const uint8_t BOX_H    = 62;
+    const uint8_t BOX_Y    = (SCREEN_H - (BOX_H + 2)) / 2;  // centred; +2 reserves shadow
+    const uint8_t HDR_HT   = 12;
+    const uint8_t ROW_H    = 12;
+    const uint8_t BODY_Y   = BOX_Y + HDR_HT + 1;
+    const uint8_t TEXT_X   = BOX_X + 10;   // indent clears the < hint glyph
+
+    // Shadow + white box + frame
+    canvas_set_color(canvas, ColorBlack);
+    canvas_draw_box(canvas, BOX_X + 2, BOX_Y + 2, BOX_W, BOX_H);
+    canvas_set_color(canvas, ColorWhite);
+    canvas_draw_box(canvas, BOX_X, BOX_Y, BOX_W, BOX_H);
+    canvas_set_color(canvas, ColorBlack);
+    canvas_draw_frame(canvas, BOX_X, BOX_Y, BOX_W, BOX_H);
+
+    // Header
+    canvas_draw_box(canvas, BOX_X, BOX_Y, BOX_W, HDR_HT);
+    canvas_set_color(canvas, ColorWhite);
+    canvas_set_font(canvas, FontSecondary);
+    canvas_draw_str_aligned(canvas, SCREEN_W / 2, BOX_Y + 1,
+                            AlignCenter, AlignTop,
+                            app->bm_range_edit_mode ? "Edit Range" : "Bookmark Range");
+    canvas_set_color(canvas, ColorBlack);
+
+    // Build a short book label (max 13 chars to fit in overlay)
+    char blabel[14];
+    current_book_label(app, blabel, sizeof(blabel));
+
+    bool both_active = (app->verse_idx == 0 || app->bm_range_edit_mode);
+    bool at_max      = (app->bm_range_end - app->bm_range_start + 1) >= BM_RANGE_MAX;
+
+    // Row 0: From
+    {
+        uint8_t y   = BODY_Y;
+        bool    sel = (app->bm_range_cursor == 0);
+        if(sel) {
+            canvas_set_color(canvas, ColorBlack);
+            canvas_draw_box(canvas, BOX_X + 1, y, BOX_W - 2, ROW_H);
+            canvas_set_color(canvas, ColorWhite);
+        } else {
+            canvas_set_color(canvas, ColorBlack);
+        }
+        char row_str[32];
+        snprintf(row_str, sizeof(row_str), "From: %s %d:%d",
+                 blabel, (int)(app->chapter_idx + 1), (int)app->bm_range_start);
+        set_ui_font(canvas, row_str);
+        canvas_draw_str(canvas, TEXT_X, y + ROW_H - 2, row_str);
+
+        if(sel && both_active) {
+            canvas_set_font(canvas, FontSecondary);
+            if(app->bm_range_start > 1)
+                canvas_draw_str_aligned(canvas, BOX_X + 3, y + ROW_H / 2,
+                                        AlignLeft, AlignCenter, "<");
+            if(app->bm_range_start < app->bm_range_end)
+                canvas_draw_str_aligned(canvas, BOX_X + BOX_W - 3, y + ROW_H / 2,
+                                        AlignRight, AlignCenter, ">");
+        }
+    }
+
+    // Row 1: To
+    {
+        uint8_t y   = BODY_Y + ROW_H;
+        bool    sel = (app->bm_range_cursor == 1);
+        if(sel) {
+            canvas_set_color(canvas, ColorBlack);
+            canvas_draw_box(canvas, BOX_X + 1, y, BOX_W - 2, ROW_H);
+            canvas_set_color(canvas, ColorWhite);
+        } else {
+            canvas_set_color(canvas, ColorBlack);
+        }
+        char row_str[32];
+        snprintf(row_str, sizeof(row_str), "  To: %s %d:%d",
+                 blabel, (int)(app->chapter_idx + 1), (int)app->bm_range_end);
+        set_ui_font(canvas, row_str);
+        canvas_draw_str(canvas, TEXT_X, y + ROW_H - 2, row_str);
+
+        if(sel) {
+            canvas_set_font(canvas, FontSecondary);
+            if(app->bm_range_end > app->bm_range_start)
+                canvas_draw_str_aligned(canvas, BOX_X + 3, y + ROW_H / 2,
+                                        AlignLeft, AlignCenter, "<");
+            if(app->bm_range_end < app->verse_count && !at_max)
+                canvas_draw_str_aligned(canvas, BOX_X + BOX_W - 3, y + ROW_H / 2,
+                                        AlignRight, AlignCenter, ">");
+        }
+    }
+
+    // Info row: range size or max-reached warning
+    canvas_set_color(canvas, ColorBlack);
+    canvas_set_font(canvas, FontSecondary);
+    uint8_t span = (uint8_t)(app->bm_range_end - app->bm_range_start + 1);
+    char info[28];
+    if(at_max)
+        snprintf(info, sizeof(info), "Max %d verses", (int)BM_RANGE_MAX);
+    else if(span > 1)
+        snprintf(info, sizeof(info), "%d verses", (int)span);
+    else
+        snprintf(info, sizeof(info), "Single verse");
+    canvas_draw_str_aligned(canvas, SCREEN_W / 2,
+                            BODY_Y + ROW_H * 2 + 4,
+                            AlignCenter, AlignTop, info);
+
+    // Bottom hint — anchored well below the info row
+    canvas_draw_str_aligned(canvas, SCREEN_W / 2,
+                            BOX_Y + BOX_H - 2,
+                            AlignCenter, AlignBottom,
+                            "OK=Confirm  Back=Cancel");
+}
+
+void on_bm_range_pick(App* app, InputEvent* ev) {
+    if(ev->type != InputTypeShort && ev->type != InputTypeRepeat) return;
+
+    bool both_active = (app->verse_idx == 0 || app->bm_range_edit_mode);
+
+    switch(ev->key) {
+    case InputKeyUp:
+    case InputKeyDown:
+        // Only switch rows when both are interactive (All mode or edit mode)
+        if(both_active) app->bm_range_cursor ^= 1;
+        break;
+
+    case InputKeyLeft:
+        if(app->bm_range_cursor == 0 && both_active) {
+            // Decrease From (minimum = verse 1)
+            if(app->bm_range_start > 1) {
+                app->bm_range_start--;
+                // Keep end >= start
+                if(app->bm_range_end < app->bm_range_start)
+                    app->bm_range_end = app->bm_range_start;
+            }
+        } else {
+            // Decrease To (minimum = start verse, i.e. single-verse bookmark)
+            if(app->bm_range_end > app->bm_range_start)
+                app->bm_range_end--;
+        }
+        break;
+
+    case InputKeyRight:
+        if(app->bm_range_cursor == 0 && both_active) {
+            // Increase From — cannot pass end, and shrinks the range
+            if(app->bm_range_start < app->bm_range_end)
+                app->bm_range_start++;
+            else if(app->bm_range_start < app->verse_count) {
+                // Move both together when start == end
+                app->bm_range_start++;
+                app->bm_range_end = app->bm_range_start;
+            }
+        } else {
+            // Increase To — capped at verse_count and at BM_RANGE_MAX
+            uint8_t max_end = app->bm_range_start + BM_RANGE_MAX - 1;
+            if(max_end > app->verse_count) max_end = app->verse_count;
+            if(app->bm_range_end < max_end)
+                app->bm_range_end++;
+        }
+        break;
+
+    case InputKeyOk:
+        if(app->bm_range_edit_mode) {
+            // Update the existing bookmark in-place
+            uint8_t bi = app->bm_item_idx;
+            app->bookmarks[bi].verse     = app->bm_range_start;
+            app->bookmarks[bi].end_verse = (app->bm_range_end > app->bm_range_start) ?
+                                           app->bm_range_end : 0;
+            bookmarks_save(app);
+            app->bm_range_edit_mode   = false;
+            app->bm_item_from_reading = false;
+            // Return to reading and open range view if it's still a range
+            app->verse_idx = app->bm_range_start;
+            refresh_verse_count(app);
+            if(app->bookmarks[bi].end_verse > app->bookmarks[bi].verse) {
+                app->bm_range_view     = true;
+                app->bm_range_view_end = app->bookmarks[bi].end_verse;
+            } else {
+                app->bm_range_view = false;
+            }
+            open_reading(app);
+        } else {
+            // New bookmark — proceed to group/heading picker
+            app->bm_pick_sel    = 0;
+            app->bm_pick_scroll = 0;
+            app->bm_pick_move   = false;
+            app->view = ViewBmGroupPick;
+        }
+        break;
+
+    case InputKeyBack:
+        app->bm_range_edit_mode   = false;
+        app->bm_item_from_reading = false;
+        app->view = ViewReading;
+        break;
+
     default: break;
     }
 }
@@ -2390,6 +2733,7 @@ static void draw_cb(Canvas* canvas, void* ctx) {
     case ViewBmGroupNew:    draw_search_input(canvas, app);  break;  // real keyboard
     case ViewBmHeadingEdit: draw_bm_heading_edit(canvas, app); break;
     case ViewBmItemEdit:    draw_bm_item_edit(canvas, app);   break;
+    case ViewBmRangePick:   draw_bm_range_pick(canvas, app);  break;
     case ViewSearch:        draw_search_input(canvas, app);   break;
     case ViewSearchResults: draw_search_results(canvas, app); break;
     case ViewLoading:  draw_loading(canvas, app);  break;
@@ -2608,6 +2952,32 @@ static void on_menu(App* app, InputEvent* ev) {
 }
 
 // Load chapter content, wrap text, reset scroll, switch to reading view
+// Open reading at a specific bookmark.
+// Handles section / book / chapter navigation and activates bm_range_view
+// automatically for range bookmarks.
+static void open_bookmark_reading(App* app, uint8_t bi) {
+    uint8_t cb = app->bookmarks[bi].canon_book;
+    app->section_idx = app->bookmarks[bi].sec;
+    rebuild_book_list(app);
+    app->book_idx = 0;
+    for(uint8_t k = 0; k < app->book_count; k++) {
+        if(app->book_list[k] == cb) { app->book_idx = k; break; }
+    }
+    app->chapter_idx = app->bookmarks[bi].chapter;
+    app->verse_idx   = app->bookmarks[bi].verse;
+    refresh_chapter_count(app);
+    refresh_verse_count(app);
+    app->prev_view = ViewBookmarks;
+
+    if(app->bookmarks[bi].end_verse > app->bookmarks[bi].verse) {
+        app->bm_range_view     = true;
+        app->bm_range_view_end = app->bookmarks[bi].end_verse;
+    } else {
+        app->bm_range_view = false;
+    }
+    open_reading(app);
+}
+
 void open_reading(App* app) {
     app->view = ViewLoading;
     view_port_update(app->view_port);
@@ -2620,9 +2990,20 @@ void open_reading(App* app) {
 // Input: Reading
 
 static void on_reading(App* app, InputEvent* ev) {
-    // Long-press OK in single-verse mode: toggle bookmark
+    // Long-press OK:
+    //   single-verse / range-view → toggle/edit bookmark
+    //   All mode                  → open range picker with adjustable From + To
     if(ev->type == InputTypeLong && ev->key == InputKeyOk) {
-        if(app->verse_idx != 0) bookmark_toggle(app);
+        if(app->verse_idx != 0) {
+            bookmark_toggle(app);   // handles both "edit existing" and "add new"
+        } else {
+            // All mode: open range picker with both From and To adjustable
+            app->bm_range_start     = app->verse_page_start;
+            app->bm_range_end       = app->verse_page_start;
+            app->bm_range_cursor    = 0;    // From row is active first
+            app->bm_range_edit_mode = false;
+            app->view = ViewBmRangePick;
+        }
         return;
     }
     if(ev->type != InputTypeShort && ev->type != InputTypeRepeat) return;
@@ -2632,7 +3013,7 @@ static void on_reading(App* app, InputEvent* ev) {
     case InputKeyUp:
         if(app->wrap.scroll > 0) {
             app->wrap.scroll--;
-        } else if(app->verse_idx == 0 && app->verse_page_start > 1) {
+        } else if(!app->bm_range_view && app->verse_idx == 0 && app->verse_page_start > 1) {
             // At top of page and there are earlier verses -- load previous page
             app->view = ViewLoading;
             view_port_update(app->view_port);
@@ -2650,7 +3031,7 @@ static void on_reading(App* app, InputEvent* ev) {
     case InputKeyDown:
         if(app->wrap.scroll + vis < app->wrap.count) {
             app->wrap.scroll++;
-        } else if(app->verse_idx == 0) {
+        } else if(!app->bm_range_view && app->verse_idx == 0) {
             // At bottom of page -- check if more verses exist
             uint8_t next_start = app->verse_page_start + app->chapter.count;
             if(next_start <= app->verse_count) {
@@ -2664,6 +3045,9 @@ static void on_reading(App* app, InputEvent* ev) {
         }
         break;
     case InputKeyLeft:
+        // Leaving a range view: behave like single-verse navigation from range start
+        if(app->bm_range_view) app->bm_range_view = false;
+
         if(app->verse_idx == 0) {
             // All mode: page back through verses in this chapter
             if(app->verse_page_start > 1) {
@@ -2698,6 +3082,28 @@ static void on_reading(App* app, InputEvent* ev) {
         }
         break;
     case InputKeyRight:
+        // Leaving a range view: navigate from the end of the range
+        if(app->bm_range_view) {
+            app->bm_range_view = false;
+            uint8_t next = app->bm_range_view_end + 1;
+            if(next <= app->verse_count) {
+                app->verse_idx = next;
+            } else {
+                // Past end of chapter: go to next chapter/book
+                if(app->chapter_idx < app->chapter_count - 1)
+                    app->chapter_idx++;
+                else if(app->book_idx < app->book_count - 1) {
+                    app->book_idx++;
+                    refresh_chapter_count(app);
+                    app->chapter_idx = 0;
+                }
+                refresh_verse_count(app);
+                app->verse_idx = 1;
+            }
+            open_reading(app);
+            break;
+        }
+
         if(app->verse_idx == 0) {
             // All mode: page forward through verses in this chapter
             uint8_t next_start = app->verse_page_start + app->chapter.count;
@@ -2728,6 +3134,7 @@ static void on_reading(App* app, InputEvent* ev) {
         }
         break;
     case InputKeyBack:
+        app->bm_range_view = false;
         app->view = app->prev_view;
         break;
     default: break;
@@ -2974,21 +3381,9 @@ static void on_bookmarks(App* app, InputEvent* ev) {
                 app->bm_scroll      = 0;
                 app->bm_scroll_tick = 0;
             } else {
-                // Ungrouped bookmark → jump to reading
+                // Ungrouped bookmark → jump to reading (range view if applicable)
                 uint8_t bi = rows[app->bm_sel].idx;
-                uint8_t cb = app->bookmarks[bi].canon_book;
-                app->section_idx = app->bookmarks[bi].sec;
-                rebuild_book_list(app);
-                app->book_idx = 0;
-                for(uint8_t k = 0; k < app->book_count; k++) {
-                    if(app->book_list[k] == cb) { app->book_idx = k; break; }
-                }
-                app->chapter_idx = app->bookmarks[bi].chapter;
-                app->verse_idx   = app->bookmarks[bi].verse;
-                refresh_chapter_count(app);
-                refresh_verse_count(app);
-                app->prev_view = ViewBookmarks;
-                open_reading(app);
+                open_bookmark_reading(app, bi);
             }
             break;
         }
@@ -3050,19 +3445,7 @@ static void on_bookmarks(App* app, InputEvent* ev) {
         case InputKeyOk: {
             if(app->bm_sel >= idx_count) break;
             uint8_t bi = idx[app->bm_sel];
-            uint8_t cb = app->bookmarks[bi].canon_book;
-            app->section_idx = app->bookmarks[bi].sec;
-            rebuild_book_list(app);
-            app->book_idx = 0;
-            for(uint8_t k = 0; k < app->book_count; k++) {
-                if(app->book_list[k] == cb) { app->book_idx = k; break; }
-            }
-            app->chapter_idx = app->bookmarks[bi].chapter;
-            app->verse_idx   = app->bookmarks[bi].verse;
-            refresh_chapter_count(app);
-            refresh_verse_count(app);
-            app->prev_view = ViewBookmarks;
-            open_reading(app);
+            open_bookmark_reading(app, bi);
             break;
         }
         case InputKeyBack:
@@ -3154,6 +3537,7 @@ int32_t luther1912_app(void* p) {
         case ViewBmGroupPick:   on_bm_group_pick(app, &ev);   break;
         case ViewBmHeadingEdit: on_bm_heading_edit(app, &ev); break;
         case ViewBmItemEdit:    on_bm_item_edit(app, &ev);    break;
+        case ViewBmRangePick:   on_bm_range_pick(app, &ev);   break;
         case ViewAbout:    on_about(app, &ev);    break;
         case ViewError:
             if(ev.type == InputTypeShort && ev.key == InputKeyBack)
