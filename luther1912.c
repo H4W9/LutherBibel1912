@@ -438,6 +438,7 @@ static void bookmark_toggle(App* app) {
         app->bm_range_end       = app->verse_idx;
         app->bm_range_cursor    = 1;        // To row is the active/adjustable one
         app->bm_range_edit_mode = false;
+        app->bm_long_consumed   = true;     // suppress Repeat/Short that follows Long
         app->view = ViewBmRangePick;
     }
 }
@@ -1081,9 +1082,11 @@ static bool icontains_ascii(const char* hay, const char* needle) {
 // across all chapters, one file at a time. No index file needed.
 // Results stored in app->hits[].
 void do_search(App* app) {
-    app->hit_count = 0;
-    app->hit_sel   = 0;
-    app->hit_scroll = 0;
+    app->hit_count     = 0;
+    app->hit_sel       = 0;
+    app->hit_scroll    = 0;
+    app->search_cancel   = false;
+    app->search_progress = 0;
 
     if(!app->search_len || app->book_count == 0) return;
 
@@ -1108,6 +1111,13 @@ void do_search(App* app) {
         uint8_t vcount = count_verse_files(app->storage, chap_path);
 
         for(uint8_t v = 1; v <= vcount && app->hit_count < MAX_SEARCH_HITS; v++) {
+            // Smooth per-verse progress: interpolate within each chapter's slice.
+            // e.g. chap 2 of 10, verse 3 of 20 → (1*100 + 3*100/20) / 10 = 11%
+            app->search_progress = (uint8_t)(
+                ((uint16_t)(chap - 1) * 100 + (uint16_t)v * 100 / vcount)
+                / chap_count);
+            view_port_update(app->view_port);
+
             char vpath[240];
             snprintf(vpath, sizeof(vpath), "%s/verse%d.txt", chap_path, (int)v);
 
@@ -1119,6 +1129,19 @@ void do_search(App* app) {
                 storage_file_close(f);
             }
             storage_file_free(f);
+
+            // Non-blocking peek after every file read — file is already closed so
+            // no handle is leaked on cancel. This gives per-verse cancellation
+            // granularity rather than per-chapter.
+            InputEvent peek;
+            if(furi_message_queue_get(app->queue, &peek, 0) == FuriStatusOk) {
+                if(peek.key == InputKeyBack) {
+                    app->search_cancel = true;
+                    app->hit_count = 0;
+                    return;
+                }
+                furi_message_queue_put(app->queue, &peek, 0);
+            }
 
             if(!opened) continue;
             if(!icontains_ascii(verse_buf, app->search_buf)) continue;
@@ -1463,6 +1486,23 @@ static void draw_reading(Canvas* canvas, App* app) {
     if(app->verse_idx == 0) {
         bool has_prev = (app->verse_page_start > 1);
         bool has_next = (app->verse_page_start + app->chapter.count - 1) < app->verse_count;
+        canvas_set_color(canvas, ColorWhite);
+        canvas_set_font(canvas, FontSecondary);
+        if(has_prev)
+            canvas_draw_str(canvas, 1, HDR_H - 2, "<");
+        if(has_next)
+            canvas_draw_str_aligned(canvas, SCREEN_W - 2, HDR_H - 2,
+                                    AlignRight, AlignBottom, ">");
+        canvas_set_color(canvas, ColorBlack);
+    } else if(!app->bm_range_view) {
+        // Single-verse mode: show hints whenever there is somewhere to navigate.
+        // Mirrors the Left/Right logic in on_reading exactly.
+        bool has_prev = (app->verse_idx > 1) ||
+                        (app->chapter_idx > 0) ||
+                        (app->book_idx > 0);
+        bool has_next = (app->verse_idx < app->verse_count) ||
+                        (app->chapter_idx < app->chapter_count - 1) ||
+                        (app->book_idx < app->book_count - 1);
         canvas_set_color(canvas, ColorWhite);
         canvas_set_font(canvas, FontSecondary);
         if(has_prev)
@@ -2612,6 +2652,13 @@ void draw_bm_range_pick(Canvas* canvas, App* app) {
 }
 
 void on_bm_range_pick(App* app, InputEvent* ev) {
+    // Suppress the Repeat/Short that fires right after the long-press that opened us
+    if(ev->type == InputTypeRelease && ev->key == InputKeyOk) {
+        app->bm_long_consumed = false;
+        return;
+    }
+    if(app->bm_long_consumed) return;
+
     if(ev->type != InputTypeShort && ev->type != InputTypeRepeat) return;
 
     bool both_active = (app->verse_idx == 0 || app->bm_range_edit_mode);
@@ -2705,8 +2752,28 @@ static void draw_loading(Canvas* canvas, App* app) {
     draw_hdr(canvas, APP_NAME " v" APP_VERSION);
     set_fg(canvas, app);
     canvas_set_font(canvas, FontSecondary);
-    canvas_draw_str_aligned(canvas, SCREEN_W / 2, SCREEN_H / 2 + 4,
-                            AlignCenter, AlignCenter, "Loading...");
+    canvas_draw_str_aligned(canvas, SCREEN_W / 2, SCREEN_H / 2 - 8,
+                            AlignCenter, AlignCenter, "Searching...");
+
+    // Progress bar
+    const uint8_t bar_x = 8;
+    const uint8_t bar_y = SCREEN_H / 2 + 4;
+    const uint8_t bar_w = SCREEN_W - 16;
+    const uint8_t bar_h = 8;
+    uint8_t fill_w = (uint8_t)((uint16_t)bar_w * app->search_progress / 100);
+
+    canvas_set_color(canvas, ColorBlack);
+    canvas_draw_frame(canvas, bar_x, bar_y, bar_w, bar_h);
+    if(fill_w > 0)
+        canvas_draw_box(canvas, bar_x, bar_y, fill_w, bar_h);
+
+    // Percentage label
+    char pct[5];
+    snprintf(pct, sizeof(pct), "%d%%", (int)app->search_progress);
+    set_fg(canvas, app);
+    canvas_set_font(canvas, FontSecondary);
+    canvas_draw_str_aligned(canvas, SCREEN_W / 2, bar_y + bar_h + 9,
+                            AlignCenter, AlignCenter, pct);
 }
 
 static void draw_error(Canvas* canvas, App* app) {
@@ -3002,6 +3069,7 @@ static void on_reading(App* app, InputEvent* ev) {
             app->bm_range_end       = app->verse_page_start;
             app->bm_range_cursor    = 0;    // From row is active first
             app->bm_range_edit_mode = false;
+            app->bm_long_consumed   = true; // suppress Repeat/Short that follows Long
             app->view = ViewBmRangePick;
         }
         return;
@@ -3064,9 +3132,9 @@ static void on_reading(App* app, InputEvent* ev) {
             // Single-verse mode: navigate to previous verse/chapter
             if(app->verse_idx > 1) {
                 app->verse_idx--;
-            } else if(app->verse_idx == 1) {
-                app->verse_idx = 0;
             } else {
+                // At verse 1 (or 0 shouldn't happen here) — go to previous chapter's
+                // last verse. Never drop into All mode (verse_idx=0) mid-navigation.
                 if(app->chapter_idx > 0) {
                     app->chapter_idx--;
                 } else if(app->book_idx > 0) {
@@ -3076,7 +3144,7 @@ static void on_reading(App* app, InputEvent* ev) {
                         app->chapter_count - 1 : 0;
                 }
                 refresh_verse_count(app);
-                app->verse_idx = 0;
+                app->verse_idx = app->verse_count;  // land on last verse
             }
             open_reading(app);
         }
@@ -3536,9 +3604,25 @@ int32_t luther1912_app(void* p) {
     view_port_update(app->view_port);
 
     InputEvent ev;
+    bool back_long_in_flight = false;  // suppresses Back Repeat that bleeds into a new view
     while(app->running) {
         if(furi_message_queue_get(app->queue, &ev, 100) != FuriStatusOk)
             continue;
+
+        // When Back is long-pressed, the view typically changes on the Long event.
+        // Any subsequent Repeat events are still in-flight for the old key hold and
+        // must not be delivered to the new view (e.g. they would exit the app from
+        // ViewMenu immediately after returning from ViewSearch).
+        if(ev.key == InputKeyBack) {
+            if(ev.type == InputTypeRelease) {
+                back_long_in_flight = false;
+            } else if(ev.type == InputTypeLong) {
+                back_long_in_flight = true;
+            } else if(ev.type == InputTypeRepeat && back_long_in_flight) {
+                view_port_update(app->view_port);
+                continue;  // discard — leaked repeat from a long-press already handled
+            }
+        }
 
         switch(app->view) {
         case ViewMenu:     on_menu(app, &ev);     break;

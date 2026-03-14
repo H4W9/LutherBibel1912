@@ -19,7 +19,7 @@
 #define BOOKMARKS_PATH  DATA_DIR "/bookmarks.txt"
 #define GROUPS_PATH     DATA_DIR "/bm_groups.txt"
 #define MAX_BOOKMARKS   250
-#define MAX_BM_GROUPS    20
+#define MAX_BM_GROUPS    25
 #define BM_GROUP_NAME_LEN 48
 // Sentinel: bookmark with group == BM_GROUP_NONE belongs to no group ("Default")
 #define BM_GROUP_NONE  0xFF
@@ -53,7 +53,7 @@
 #define KEYWORDS_PATH_EN DATA_DIR "/keywords_en.txt"
 #define MAX_KEYWORDS    200   // max words loaded from file
 #define KEYWORD_WORD_LEN 32   // max chars per keyword
-#define SUGGEST_MAX       5   // candidates held at once
+#define SUGGEST_MAX       7   // candidates held at once
 
 #define MAX_TRANSLATIONS   10
 #define TRANSLATION_NAME_LEN 32
@@ -257,6 +257,10 @@ typedef struct App {
     // Search cancellation: set true inside do_search when a Back press is detected
     // mid-search; checked in keyboard.c after do_search() returns.
     bool    search_cancel;
+
+    // Search progress (0-100): updated each chapter inside do_search so the
+    // loading screen can render a filled bar and percentage.
+    uint8_t search_progress;
 
     // Available sections for the current translation (subset of 0..3)
     uint8_t avail_sections[4];
