@@ -99,10 +99,16 @@ typedef enum {
 } FontChoice;
 
 typedef enum {
-    SettingsRowTranslation = 0,
-    SettingsRowFont        = 1,
-    SettingsRowDark        = 2,
-    SettingsRowCount       = 3,
+    SearchScopeChapter = 0,
+    SearchScopeBook    = 1,
+} SearchScope;
+
+typedef enum {
+    SettingsRowTranslation  = 0,
+    SettingsRowFont         = 1,
+    SettingsRowSearchScope  = 2,
+    SettingsRowDark         = 3,
+    SettingsRowCount        = 4,
 } SettingsRow;
 
 // ============================================================
@@ -148,9 +154,10 @@ typedef struct App {
     uint8_t      verse_page_start;
 
     // Settings
-    FontChoice  font_choice;
-    bool        dark_mode;
-    SettingsRow settings_sel;
+    FontChoice   font_choice;
+    bool         dark_mode;
+    SearchScope  search_scope;
+    SettingsRow  settings_sel;
     uint8_t     settings_font_sel;
     bool        settings_font_open;
     uint8_t     settings_trans_sel;
@@ -277,7 +284,7 @@ typedef struct App {
 } App;
 
 // ============================================================
-// Shared function declarations (defined in luther1912.c,
+// Shared function declarations (defined in bible.c,
 // called by keyboard.c)
 // ============================================================
 

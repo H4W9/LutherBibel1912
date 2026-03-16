@@ -1,5 +1,5 @@
 #pragma once
-#include "../luther1912.h"
+#include "../bible.h"
 
 extern const char kb_page0[KB_NROWS][KB_NCOLS];
 extern const char kb_page1[KB_NROWS][KB_NCOLS];

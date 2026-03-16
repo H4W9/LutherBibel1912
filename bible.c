@@ -1,11 +1,11 @@
 // Luther Bibel 1912 Viewer for Flipper Zero
-// SD card: /ext/apps_data/luther1912/<Section>/<Book>/<Chapter>/verseN.txt
+// SD card: /ext/apps_data/fz_bible_app/<Section>/<Book>/<Chapter>/verseN.txt
 
 #define APP_VERSION "1.5"
 #define APP_NAME    "FZ Bible"
 
 #include "font/font.h"
-#include "luther1912.h"
+#include "bible.h"
 #include "keyboard/keyboard.h"
 #include <furi.h>
 #include <furi_hal.h>
@@ -221,14 +221,15 @@ static void settings_save(App* app) {
     }
     char buf[128];
     int len = snprintf(buf, sizeof(buf),
-        "font=%d\ndark=%d\nsec=%d\nbook=%d\nchap=%d\nverse=%d\ntrans=%d\n",
+        "font=%d\ndark=%d\nsec=%d\nbook=%d\nchap=%d\nverse=%d\ntrans=%d\nscope=%d\n",
         (int)app->font_choice,
         (int)app->dark_mode,
         (int)app->section_idx,
         (int)app->book_idx,
         (int)app->chapter_idx,
         (int)app->verse_idx,
-        (int)app->translation_idx);
+        (int)app->translation_idx,
+        (int)app->search_scope);
     if(len > 0) storage_file_write(f, buf, (uint16_t)len);
     storage_file_close(f);
     storage_file_free(f);
@@ -238,6 +239,7 @@ static void settings_load(App* app) {
     // Defaults
     app->font_choice  = FontSecondaryBuiltin;
     app->dark_mode    = false;
+    app->search_scope = SearchScopeBook;
     app->section_idx  = 0;
     app->book_idx     = 0;
     app->chapter_idx  = 0;
@@ -257,6 +259,7 @@ static void settings_load(App* app) {
     char* p;
     if((p = strstr(buf, "font="))  != NULL) { int v=atoi(p+5); if(v>=0&&v<FONT_COUNT) app->font_choice=(FontChoice)v; }
     if((p = strstr(buf, "dark="))  != NULL) { app->dark_mode = (atoi(p+5) != 0); }
+    if((p = strstr(buf, "scope=")) != NULL) { int v=atoi(p+6); if(v==0||v==1) app->search_scope=(SearchScope)v; }
     if((p = strstr(buf, "sec="))   != NULL) { int v=atoi(p+4); if(v>=0&&v<4) app->section_idx=(uint8_t)v; }
     if((p = strstr(buf, "book="))  != NULL) { int v=atoi(p+5); if(v>=0&&v<MAX_BOOKS) app->book_idx=(uint8_t)v; }
     if((p = strstr(buf, "chap="))  != NULL) { int v=atoi(p+5); if(v>=0&&v<151) app->chapter_idx=(uint8_t)v; }
@@ -1068,9 +1071,19 @@ static bool icontains_ascii(const char* hay, const char* needle) {
     for(size_t i = 0; i <= hlen - nlen; i++) {
         bool ok = true;
         for(size_t j = 0; j < nlen; j++) {
-            char a = hay[i+j], b = needle[j];
-            if(a >= 'A' && a <= 'Z') a = (char)(a + 32);
-            if(b >= 'A' && b <= 'Z') b = (char)(b + 32);
+            uint8_t a = (uint8_t)hay[i+j], b = (uint8_t)needle[j];
+            // ASCII case fold (A-Z → a-z)
+            if(a >= 'A' && a <= 'Z') a = (uint8_t)(a + 32);
+            if(b >= 'A' && b <= 'Z') b = (uint8_t)(b + 32);
+            // UTF-8 umlaut case fold:
+            //   Ä 0xC3 0x84 → ä 0xC3 0xA4   (+0x20)
+            //   Ö 0xC3 0x96 → ö 0xC3 0xB6   (+0x20)
+            //   Ü 0xC3 0x9C → ü 0xC3 0xBC   (+0x20)
+            if(j > 0 &&
+               (uint8_t)hay[i+j-1] == 0xC3 && (uint8_t)needle[j-1] == 0xC3) {
+                if(a == 0x84 || a == 0x96 || a == 0x9C) a = (uint8_t)(a + 0x20);
+                if(b == 0x84 || b == 0x96 || b == 0x9C) b = (uint8_t)(b + 0x20);
+            }
             if(a != b) { ok = false; break; }
         }
         if(ok) return true;
@@ -1102,20 +1115,31 @@ void do_search(App* app) {
     uint8_t chap_count = count_chapter_dirs(app->storage, book_path);
     if(chap_count == 0) return;
 
+    // Determine chapter range based on search scope
+    uint8_t chap_start, chap_end;
+    if(app->search_scope == SearchScopeChapter) {
+        chap_start = app->chapter_idx + 1;  // chapter_idx is 0-based; files are 1-based
+        chap_end   = chap_start;
+        if(chap_start > chap_count) return;
+    } else {
+        chap_start = 1;
+        chap_end   = chap_count;
+    }
+
     char verse_buf[VERSE_BUF_LEN];
 
-    for(uint8_t chap = 1; chap <= chap_count && app->hit_count < MAX_SEARCH_HITS; chap++) {
+    for(uint8_t chap = chap_start; chap <= chap_end && app->hit_count < MAX_SEARCH_HITS; chap++) {
         char chap_path[220];
         snprintf(chap_path, sizeof(chap_path), "%s/%d", book_path, (int)chap);
 
         uint8_t vcount = count_verse_files(app->storage, chap_path);
 
         for(uint8_t v = 1; v <= vcount && app->hit_count < MAX_SEARCH_HITS; v++) {
-            // Smooth per-verse progress: interpolate within each chapter's slice.
-            // e.g. chap 2 of 10, verse 3 of 20 → (1*100 + 3*100/20) / 10 = 11%
+            // Progress: proportion through the searched chapter range
+            uint8_t range = (uint8_t)(chap_end - chap_start + 1);
             app->search_progress = (uint8_t)(
-                ((uint16_t)(chap - 1) * 100 + (uint16_t)v * 100 / vcount)
-                / chap_count);
+                ((uint16_t)(chap - chap_start) * 100 + (uint16_t)v * 100 / vcount)
+                / range);
             view_port_update(app->view_port);
 
             char vpath[240];
@@ -1541,7 +1565,7 @@ static void draw_settings(Canvas* canvas, App* app) {
     canvas_set_font(canvas, FontSecondary);
 
     const uint8_t ITEM_H = 11;
-    const uint8_t BODY_Y = HDR_H + 2;
+    const uint8_t BODY_Y = HDR_H + 1;
     const uint8_t VIS    = 4;
 
     if(app->settings_font_open) {
@@ -1656,9 +1680,29 @@ static void draw_settings(Canvas* canvas, App* app) {
         set_fg(canvas, app);
     }
 
-    // Row 2 (or 1): Dark mode
+    // Row 2 (or 1): Search Scope
     {
         uint8_t row_offset = (app->translation_count > 1) ? 2 : 1;
+        uint8_t y   = BODY_Y + ITEM_H * row_offset;
+        bool    sel = (app->settings_sel == SettingsRowSearchScope);
+        if(sel) {
+            set_fg(canvas, app);
+            canvas_draw_box(canvas, 0, y, SCREEN_W, ITEM_H);
+            set_bg(canvas, app);
+        } else {
+            set_fg(canvas, app);
+        }
+        canvas_draw_str(canvas, 3, y + 8, "Search");
+        canvas_draw_str_aligned(canvas, SCREEN_W - 2, y + 8,
+                                AlignRight, AlignBottom,
+                                app->search_scope == SearchScopeChapter
+                                    ? "[Chapter]" : "[Book]");
+        set_fg(canvas, app);
+    }
+
+    // Row 3 (or 2): Dark mode
+    {
+        uint8_t row_offset = (app->translation_count > 1) ? 3 : 2;
         uint8_t y   = BODY_Y + ITEM_H * row_offset;
         bool    sel = (app->settings_sel == SettingsRowDark);
         if(sel) {
@@ -3329,7 +3373,7 @@ static void on_settings(App* app, InputEvent* ev) {
 
     if(ev->type != InputTypeShort && ev->type != InputTypeRepeat) return;
 
-    uint8_t row_count = (app->translation_count > 1) ? 3 : 2;
+    uint8_t row_count = (app->translation_count > 1) ? 4 : 3;
 
     switch(ev->key) {
     case InputKeyUp:
@@ -3344,6 +3388,9 @@ static void on_settings(App* app, InputEvent* ev) {
     case InputKeyRight:
         if(app->settings_sel == SettingsRowDark) {
             app->dark_mode = !app->dark_mode;
+        } else if(app->settings_sel == SettingsRowSearchScope) {
+            app->search_scope = (app->search_scope == SearchScopeChapter)
+                                ? SearchScopeBook : SearchScopeChapter;
         } else if(app->settings_sel == SettingsRowFont) {
             if(ev->key == InputKeyLeft) {
                 app->settings_font_sel = (app->settings_font_sel > 0) ?
@@ -3546,7 +3593,7 @@ static void on_bookmarks(App* app, InputEvent* ev) {
 
 // Entry point
 
-int32_t luther1912_app(void* p) {
+int32_t bible_app(void* p) {
     UNUSED(p);
 
     App* app = malloc(sizeof(App));
